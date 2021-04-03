@@ -60,8 +60,6 @@ class EntityEmbeddings(nn.Module):
         if self.config.entity_emb_size != self.config.hidden_size:
             entity_embeddings = self.entity_embedding_dense(entity_embeddings)
 
-        import pdb; pdb.set_trace()
-
         position_embeddings = self.position_embeddings(position_ids.clamp(min=0))
         position_embedding_mask = (position_ids != -1).type_as(position_embeddings).unsqueeze(-1)
         position_embeddings = position_embeddings * position_embedding_mask
