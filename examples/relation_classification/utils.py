@@ -59,6 +59,9 @@ class DatasetProcessor(object):
         return ["no_relation"] + sorted(labels)
 
     def _create_examples(self, data_dir, set_type):
+        """
+        Creates individual samples and stores them in InputExample objects.
+        """
         with open(os.path.join(data_dir, set_type + ".json"), "r") as f:
             data = json.load(f)
 
@@ -74,20 +77,27 @@ class DatasetProcessor(object):
             else:
                 entity_order = ("obj", "subj")
 
-            text = ""
+            # Get character-level spans for entities. #############################################
+            text = ''
             cur = 0
             char_spans = dict(subj=[None, None], obj=[None, None])
             for target_entity in entity_order:
                 token_span = token_spans[target_entity]
-                text += " ".join(tokens[cur : token_span[0]])
+
+                text += ' '.join(tokens[cur:token_span[0]])
+
                 if text:
-                    text += " "
+                    text += ' '
+
                 char_spans[target_entity][0] = len(text)
-                text += " ".join(tokens[token_span[0] : token_span[1]]) + " "
+                text += ' '.join(tokens[token_span[0]:token_span[1]]) + ' '
+
                 char_spans[target_entity][1] = len(text)
                 cur = token_span[1]
-            text += " ".join(tokens[cur:])
+
+            text += ' '.join(tokens[cur:])
             text = text.rstrip()
+            #######################################################################################
 
             examples.append(
                 InputExample(

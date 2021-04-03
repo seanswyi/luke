@@ -85,7 +85,7 @@ class Trainer(object):
                 return contextlib.ExitStack()
 
         model.train()
-
+        import pdb; pdb.set_trace()
         with tqdm(total=self.num_train_steps, disable=self.args.local_rank not in (-1, 0)) as pbar:
             while True:
                 for step, batch in enumerate(self.dataloader):

@@ -59,6 +59,8 @@ def run(common_args, **task_args):
     train_dataloader, _, _, label_list = load_examples(args, fold="train")
     num_labels = len(label_list)
 
+    import pdb; pdb.set_trace()
+
     results = {}
     if args.do_train:
         model = LukeForRelationClassification(args, num_labels)

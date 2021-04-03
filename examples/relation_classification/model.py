@@ -38,10 +38,13 @@ class LukeForRelationClassification(LukeEntityAwareAttentionModel):
             entity_attention_mask,
         )
 
+        # Concatenate head and tail entity hidden states.
+        # feature_vector.shape = (batch_size, hidden_dim * 2)
         feature_vector = torch.cat([encoder_outputs[1][:, 0, :], encoder_outputs[1][:, 1, :]], dim=1)
         feature_vector = self.dropout(feature_vector)
 
         logits = self.classifier(feature_vector)
+
         if label is None:
             return logits
 

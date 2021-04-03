@@ -52,12 +52,15 @@ class EntityEmbeddings(nn.Module):
     def forward(
         self, entity_ids: torch.LongTensor, position_ids: torch.LongTensor, token_type_ids: torch.LongTensor = None
     ):
+        import pdb; pdb.set_trace()
         if token_type_ids is None:
             token_type_ids = torch.zeros_like(entity_ids)
 
         entity_embeddings = self.entity_embeddings(entity_ids)
         if self.config.entity_emb_size != self.config.hidden_size:
             entity_embeddings = self.entity_embedding_dense(entity_embeddings)
+
+        import pdb; pdb.set_trace()
 
         position_embeddings = self.position_embeddings(position_ids.clamp(min=0))
         position_embedding_mask = (position_ids != -1).type_as(position_embeddings).unsqueeze(-1)
@@ -181,8 +184,10 @@ class LukeModel(nn.Module):
         self, word_attention_mask: torch.LongTensor, entity_attention_mask: torch.LongTensor
     ):
         attention_mask = word_attention_mask
+
         if entity_attention_mask is not None:
             attention_mask = torch.cat([attention_mask, entity_attention_mask], dim=1)
+
         extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
         extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype)
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
@@ -206,6 +211,7 @@ class LukeEntityAwareAttentionModel(LukeModel):
         entity_segment_ids,
         entity_attention_mask,
     ):
+        import pdb; pdb.set_trace()
         word_embeddings = self.embeddings(word_ids, word_segment_ids)
         entity_embeddings = self.entity_embeddings(entity_ids, entity_position_ids, entity_segment_ids)
         attention_mask = self._compute_extended_attention_mask(word_attention_mask, entity_attention_mask)
