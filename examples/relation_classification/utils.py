@@ -67,6 +67,48 @@ class DatasetProcessor(object):
             data = json.load(f)
 
         examples = []
+        import pdb; pdb.set_trace()
+
+        # for idx, item in enumerate(data):
+        #     words = item['token']
+        #     subj_starts = item['subj_start']
+        #     subj_ends = item['subj_end']
+        #     obj_starts = item['obj_start']
+        #     obj_ends = item['obj_end']
+
+        #     subj_spans = list(zip(subj_starts, subj_ends))
+        #     obj_spans = list(zip(obj_starts, obj_ends))
+
+        #     mention_spans = dict(subj=subj_spans, obj=obj_spans)
+
+        #     text = ''
+        #     current_idx = 0
+        #     word2char_map = {}
+
+        #     for idx, word in enumerate(words):
+        #         word2char_map[idx] = list(range(current_idx, current_idx + len(word) + 1))
+        #         current_idx = word2char_map[idx][-1] + 1
+
+        #     char_spans = dict(subj=[], obj=[])
+        #     for entity in mention_spans:
+        #         for mention_span in mention_spans[entity]:
+        #             word_lvl_start = mention_span[0]
+        #             word_lvl_end = mention_span[1]
+                    
+        #             char_lvl_start = word2char_map[word_lvl_start][0]
+        #             char_lvl_end = word2char_map[word_lvl_end - 1][-1]
+
+        #             char_spans[entity].append((char_lvl_start, char_lvl_end))
+
+        #     input_example = InputExample(f'{set_type}-{i}',
+        #                                  ' '.join(words),
+        #                                  char_spans['subj'],
+        #                                  char_spans['obj'],
+        #                                  item['subj_type'],
+        #                                  item['obj_type'],
+        #                                  item['relation'])
+        #     examples.append(input_example)
+
         for i, item in enumerate(data):
             tokens = item["token"]
             token_spans = dict(
@@ -83,7 +125,7 @@ class DatasetProcessor(object):
             cur = 0
             char_spans = dict(subj=[None, None], obj=[None, None])
             for target_entity in entity_order:
-                token_span = token_spans[target_entity]
+                token_span = token_spans[target_entity] # Convert this so that we're looping through all mention spans.
 
                 text += ' '.join(tokens[cur:token_span[0]])
 
@@ -99,7 +141,7 @@ class DatasetProcessor(object):
             text += ' '.join(tokens[cur:])
             text = text.rstrip()
             #######################################################################################
-
+            import pdb; pdb.set_trace()
             examples.append(
                 InputExample(
                     "%s-%s" % (set_type, i),
