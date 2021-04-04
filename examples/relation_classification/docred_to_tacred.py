@@ -6,19 +6,21 @@ import os
 from tqdm import tqdm
 
 
-def adjust_positions(mentions, text):
-    mentions = sorted(mentions, key=lambda x: x['sent_id'])
+def adjust_mention_positions(entities, text):
+    for entity_idx, entity in enumerate(entities):
+        entity = sorted(entity, key=lambda x: x['sent_id'])
+        for mention_idx, mention in enumerate(entity):
+            sent_id = mention['sent_id']
 
-    for idx, mention in enumerate(mentions):
-        if mention['sent_id'] == 0:
-            continue
+            # No need to adjust span for first sentence.
+            if sent_id == 0:
+                continue
 
-        prev_sent_lengths = sum([len(x) for x in text[:mention['sent_id']]])
-        adjusted_positions = [i + prev_sent_lengths for i in mention['pos']]
+            prev_sent_lengths = sum([len(x) for x in text[:sent_id]])
+            adjusted_positions = [i + prev_sent_lengths for i in mention['pos']]
+            entity[mention_idx]['pos'] = adjusted_positions
 
-        mentions[idx]['pos'] = adjusted_positions
-
-    return mentions
+    return entities
 
 
 def process(data_file):
@@ -39,6 +41,7 @@ def process(data_file):
     for sample in progress_bar:
         text = sample['sents']
         entities = sample['vertexSet']
+        entities = adjust_mention_positions(entities, text)
         triplets = sample['labels']
         title = sample['title']
 
@@ -64,8 +67,8 @@ def process(data_file):
             tail = triplet['t']
             relation = triplet['r']
 
-            head_entity_mentions = adjust_positions(mentions=entities[head], text=text)
-            tail_entity_mentions = adjust_positions(mentions=entities[tail], text=text)
+            head_entity_mentions = entities[head]
+            tail_entity_mentions = entities[tail]
 
             subj_starts = [x['pos'][0] for x in head_entity_mentions]
             subj_ends = [x['pos'][1] for x in head_entity_mentions]
