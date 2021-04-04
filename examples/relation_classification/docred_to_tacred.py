@@ -105,8 +105,8 @@ def process(data_file):
             tail = negative_pair[1]
             relation = 'Na'
 
-            head_entity_mentions = adjust_positions(mentions=entities[head], text=text)
-            tail_entity_mentions = adjust_positions(mentions=entities[tail], text=text)
+            head_entity_mentions = entities[head]
+            tail_entity_mentions = entities[tail]
 
             subj_starts = [x['pos'][0] for x in head_entity_mentions]
             subj_ends = [x['pos'][1] for x in head_entity_mentions]
@@ -142,8 +142,8 @@ def main(args):
     converted_train_data = process(train_file)
     converted_dev_data = process(dev_file)
 
-    train_savefile = os.path.join(args.save_dir, 'train_tacred.json')
-    dev_savefile = os.path.join(args.save_dir, 'dev_tacred.json')
+    train_savefile = os.path.join(args.save_dir, 'train.json')
+    dev_savefile = os.path.join(args.save_dir, 'dev.json')
 
     with open(file=train_savefile, mode='w') as f:
         json.dump(obj=converted_train_data, fp=f, indent=2)
