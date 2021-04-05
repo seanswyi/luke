@@ -52,7 +52,6 @@ class EntityEmbeddings(nn.Module):
     def forward(
         self, entity_ids: torch.LongTensor, position_ids: torch.LongTensor, token_type_ids: torch.LongTensor = None
     ):
-        import pdb; pdb.set_trace()
         if token_type_ids is None:
             token_type_ids = torch.zeros_like(entity_ids)
 
@@ -67,6 +66,17 @@ class EntityEmbeddings(nn.Module):
         position_embeddings = position_embeddings / position_embedding_mask.sum(dim=-2).clamp(min=1e-7)
 
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
+
+        # Aggregate mention-level embeddings for document setting. ################################
+        if position_embeddings.dim() == 4:
+            head_mention_embeddings = position_embeddings[:, 0, :, :] # Get all head entity mentions.
+            tail_mention_embeddings = position_embeddings[:, 1, :, :] # Get all tail entity mentions.
+
+            head_entity_embeddings = torch.logsumexp(head_mention_embeddings, dim=1, keepdim=True)
+            tail_entity_embeddings = torch.logsumexp(tail_mention_embeddings, dim=1, keepdim=True)
+
+            position_embeddings = torch.cat([head_entity_embeddings, tail_entity_embeddings], dim=1)
+        ###########################################################################################
 
         embeddings = entity_embeddings + position_embeddings + token_type_embeddings
         embeddings = self.LayerNorm(embeddings)
@@ -209,7 +219,6 @@ class LukeEntityAwareAttentionModel(LukeModel):
         entity_segment_ids,
         entity_attention_mask,
     ):
-        import pdb; pdb.set_trace()
         word_embeddings = self.embeddings(word_ids, word_segment_ids)
         entity_embeddings = self.entity_embeddings(entity_ids, entity_position_ids, entity_segment_ids)
         attention_mask = self._compute_extended_attention_mask(word_attention_mask, entity_attention_mask)

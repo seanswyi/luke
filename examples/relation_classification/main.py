@@ -9,13 +9,14 @@ from torch.utils.data import DataLoader, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 from transformers import WEIGHTS_NAME
+import wandb
 
 from luke.utils.entity_vocab import MASK_TOKEN
 
 from ..utils import set_seed
 from ..utils.trainer import Trainer, trainer_args
 from .model import LukeForRelationClassification
-from .utils import HEAD_TOKEN, TAIL_TOKEN, convert_examples_to_features, DatasetProcessor
+from .utils import HEAD_TOKEN, TAIL_TOKEN, convert_examples_to_features, DatasetProcessor, DocumentDatasetProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +35,15 @@ def cli():
 @click.option("--num-train-epochs", default=5.0)
 @click.option("--seed", default=42)
 @click.option("--train-batch-size", default=4)
+
+@click.option('--setting', default='sentence')
+@click.option('--debug/--no-debug', default=False)
+
 @trainer_args
 @click.pass_obj
 def run(common_args, **task_args):
+    wandb.init(project="LUKE DocRED", name="logsumexp")
+    logger.info("Started process.")
     task_args.update(common_args)
     args = Namespace(**task_args)
 
@@ -44,6 +51,7 @@ def run(common_args, **task_args):
 
     args.experiment.log_parameters({p.name: getattr(args, p.name) for p in run.params})
 
+    logger.info("Starting embedding and tokenizer configuration.")
     args.model_config.vocab_size += 2
     word_emb = args.model_weights["embeddings.word_embeddings.weight"]
     head_emb = word_emb[args.tokenizer.convert_tokens_to_ids(["@"])[0]].unsqueeze(0)
@@ -56,10 +64,8 @@ def run(common_args, **task_args):
     args.model_config.entity_vocab_size = 3
     args.model_weights["entity_embeddings.entity_embeddings.weight"] = torch.cat([entity_emb[:1], mask_emb])
 
-    train_dataloader, _, _, label_list = load_examples(args, fold="train")
+    train_dataloader, _, _, label_list = load_examples(args, fold='train', setting=args.setting)
     num_labels = len(label_list)
-
-    import pdb; pdb.set_trace()
 
     results = {}
     if args.do_train:
@@ -77,6 +83,9 @@ def run(common_args, **task_args):
             if global_step % num_train_steps_per_epoch == 0 and args.local_rank in (0, -1):
                 epoch = int(global_step / num_train_steps_per_epoch - 1)
                 dev_results = evaluate(args, model, fold="dev")
+
+                wandb.log(dev_results)
+
                 args.experiment.log_metrics({f"dev_{k}_epoch{epoch}": v for k, v in dev_results.items()}, epoch=epoch)
                 results.update({f"dev_{k}_epoch{epoch}": v for k, v in dev_results.items()})
                 tqdm.write("dev: " + str(dev_results))
@@ -114,36 +123,43 @@ def run(common_args, **task_args):
             model.load_state_dict(torch.load(os.path.join(args.output_dir, WEIGHTS_NAME), map_location="cpu"))
         model.to(args.device)
 
-        for eval_set in ("dev", "test"):
-            output_file = os.path.join(args.output_dir, f"{eval_set}_predictions.txt")
-            results.update({f"{eval_set}_{k}": v for k, v in evaluate(args, model, eval_set, output_file).items()})
+        if args.setting == 'sentence':
+            eval_sets = ['dev', 'test']
+        elif args.setting == 'document':
+            eval_sets = ['dev']
+
+        for eval_set in eval_sets:
+            output_file = os.path.join(args.output_dir, f'{eval_set}_predictions.txt')
+            results.update({f'{eval_set}_{k}': v for k, v in evaluate(args, model, eval_set, output_file).items()})
 
     logger.info("Results: %s", json.dumps(results, indent=2, sort_keys=True))
     args.experiment.log_metrics(results)
-    with open(os.path.join(args.output_dir, "results.json"), "w") as f:
-        json.dump(results, f)
+
+    save_file = os.path.join(args.output_dir, 'results.json')
+    with open(file=save_file, mode='w') as f:
+        json.dump(obj=results, fp=f, indent=2)
 
     return results
 
 
-def evaluate(args, model, fold="dev", output_file=None):
-    dataloader, _, _, label_list = load_examples(args, fold=fold)
+def evaluate(args, model, fold='dev', output_file=None):
+    dataloader, _, _, label_list = load_examples(args, fold=fold, setting=args.setting)
     predictions = []
     labels = []
 
     model.eval()
     for batch in tqdm(dataloader, desc=fold):
-        inputs = {k: v.to(args.device) for k, v in batch.items() if k != "label"}
+        inputs = {k: v.to(args.device) for k, v in batch.items() if k != 'label'}
         with torch.no_grad():
             logits = model(**inputs)
 
         predictions.extend(logits.detach().cpu().numpy().argmax(axis=1))
-        labels.extend(batch["label"].to("cpu").tolist())
+        labels.extend(batch['label'].to('cpu').tolist())
 
     if output_file:
-        with open(output_file, "w") as f:
+        with open(file=output_file, mode='w') as f:
             for prediction in predictions:
-                f.write(label_list[prediction] + "\n")
+                f.write(label_list[prediction] + '\n')
 
     num_predicted_labels = 0
     num_gold_labels = 0
@@ -170,22 +186,30 @@ def evaluate(args, model, fold="dev", output_file=None):
     return dict(precision=precision, recall=recall, f1=f1)
 
 
-def load_examples(args, fold="train"):
-    if args.local_rank not in (-1, 0) and fold == "train":
+def load_examples(args, fold='train', setting='sentence'):
+    logger.info("Loading data...")
+    if args.local_rank not in (-1, 0) and fold == 'train':
         torch.distributed.barrier()
 
-    processor = DatasetProcessor()
-    if fold == "train":
-        examples = processor.get_train_examples(args.data_dir)
-    elif fold == "dev":
-        examples = processor.get_dev_examples(args.data_dir)
+    if setting == 'sentence':
+        processor = DatasetProcessor()
+    elif setting == 'document':
+        processor = DocumentDatasetProcessor()
+        args.data_dir = '/hdd1/seokwon/data/DocRED/TACRED-style'
     else:
-        examples = processor.get_test_examples(args.data_dir)
+        raise NotImplementedError
 
-    label_list = processor.get_label_list(args.data_dir)
+    if fold == "train":
+        examples = processor.get_train_examples(args.data_dir, debug=args.debug)
+    elif fold == "dev":
+        examples = processor.get_dev_examples(args.data_dir, debug=args.debug)
+    elif (fold == 'test') and (setting == 'sentence'):
+        examples = processor.get_test_examples(args.data_dir, debug=args.debug)
+
+    label_list = processor.get_label_list(args.data_dir, examples=examples)
 
     logger.info("Creating features from the dataset...")
-    features = convert_examples_to_features(examples, label_list, args.tokenizer, args.max_mention_length)
+    features = convert_examples_to_features(examples, label_list, args.tokenizer, args.max_mention_length, setting=setting)
 
     if args.local_rank == 0 and fold == "train":
         torch.distributed.barrier()
@@ -193,7 +217,9 @@ def load_examples(args, fold="train"):
     def collate_fn(batch):
         def create_padded_sequence(attr_name, padding_value):
             tensors = [torch.tensor(getattr(o, attr_name), dtype=torch.long) for o in batch]
-            return torch.nn.utils.rnn.pad_sequence(tensors, batch_first=True, padding_value=padding_value)
+            padded_tensor = torch.nn.utils.rnn.pad_sequence(tensors, batch_first=True, padding_value=padding_value)
+
+            return padded_tensor
 
         return dict(
             word_ids=create_padded_sequence("word_ids", args.tokenizer.pad_token_id),
@@ -206,13 +232,14 @@ def load_examples(args, fold="train"):
             label=torch.tensor([o.label for o in batch], dtype=torch.long),
         )
 
-    if fold in ("dev", "test"):
+    if fold in ['dev', 'test']:
         dataloader = DataLoader(features, batch_size=args.eval_batch_size, shuffle=False, collate_fn=collate_fn)
     else:
         if args.local_rank == -1:
             sampler = RandomSampler(features)
         else:
             sampler = DistributedSampler(features)
+
         dataloader = DataLoader(features, sampler=sampler, batch_size=args.train_batch_size, collate_fn=collate_fn)
 
     return dataloader, examples, features, label_list

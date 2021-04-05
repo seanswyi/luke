@@ -7,6 +7,7 @@ import click
 import torch
 from tqdm import tqdm
 from transformers import WEIGHTS_NAME, AdamW, get_constant_schedule_with_warmup, get_linear_schedule_with_warmup
+import wandb
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,8 @@ class Trainer(object):
         self.dataloader = dataloader
         self.num_train_steps = num_train_steps
         self.step_callback = step_callback
+
+        self.tokenizer = args.tokenizer
 
         self.optimizer = self._create_optimizer(model)
         self.scheduler = self._create_scheduler(self.optimizer)
@@ -85,7 +88,6 @@ class Trainer(object):
                 return contextlib.ExitStack()
 
         model.train()
-        import pdb; pdb.set_trace()
         with tqdm(total=self.num_train_steps, disable=self.args.local_rank not in (-1, 0)) as pbar:
             while True:
                 for step, batch in enumerate(self.dataloader):
@@ -103,6 +105,7 @@ class Trainer(object):
                             loss.backward()
 
                     tr_loss += loss.item()
+
                     if (step + 1) % self.args.gradient_accumulation_steps == 0:
                         if self.args.max_grad_norm != 0.0:
                             if self.args.fp16:
@@ -140,6 +143,8 @@ class Trainer(object):
                 if global_step == self.num_train_steps:
                     break
                 epoch += 1
+
+                wandb.log({'loss': tr_loss / global_step})
 
         logger.info("global_step = %s, average loss = %s", global_step, tr_loss / global_step)
 

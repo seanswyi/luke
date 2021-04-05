@@ -267,6 +267,10 @@ def convert_examples_to_features(examples, label_list, tokenizer, max_mention_le
             all_spans = sorted(all_spans, key=lambda x: x[0])
             all_spans.append((all_spans[-1][1], len(text)))
 
+            # If text doesn't start with entity mention then we need to account for that text separately.
+            if all_spans[0][0] != 0:
+                all_spans = [(0, all_spans[0][0])] + all_spans
+
             entity_marker_text = []
             for span in all_spans:
                 if span in head_spans:
@@ -381,5 +385,21 @@ def convert_examples_to_features(examples, label_list, tokenizer, max_mention_le
                                 entity_attention_mask=entity_attention_mask,
                                 label=label_map[example.label])
         features.append(feature)
+
+    if setting == 'document':
+        max_num_mentions = max([len(mention) for feature in features for mention in feature.entity_position_ids])
+        position_pad = [-1] * max_mention_length
+
+        for idx, feature in enumerate(features):
+            entity_position_ids = feature.entity_position_ids
+
+            if len(entity_position_ids[0]) == max_num_mentions:
+                continue
+
+            for entity in entity_position_ids:
+                num_mentions = len(entity)
+                num_necessary_padding = max_num_mentions - num_mentions
+
+                entity.extend([position_pad] * num_necessary_padding)
 
     return features
