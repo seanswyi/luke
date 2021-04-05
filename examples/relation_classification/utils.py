@@ -342,7 +342,7 @@ def convert_examples_to_features(examples, label_list, tokenizer, max_mention_le
             tokens.append(tokenizer.sep_token)
             #######################################################################################
 
-            # Get remaining feature data. #########################################################
+            # Get entity positions. We also have to pad the mentions.##############################
             entity_position_ids = []
             for span_name in token_spans:
                 spans = token_spans[span_name]
@@ -354,6 +354,15 @@ def convert_examples_to_features(examples, label_list, tokenizer, max_mention_le
                     position_ids.append(position_id_span)
 
                 entity_position_ids.append(position_ids)
+
+            max_num_mentions = max([len(x) for x in entity_position_ids])
+            position_pad = [-1] * max_mention_length
+            for idx, position_ids in enumerate(entity_position_ids):
+                if len(position_ids) == max_num_mentions:
+                    continue
+
+                while len(entity_position_ids[idx]) < max_num_mentions:
+                    entity_position_ids[idx].append(position_pad)
             #######################################################################################
 
         word_ids = tokenizer.convert_tokens_to_ids(tokens)
