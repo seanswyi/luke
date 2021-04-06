@@ -37,7 +37,7 @@ run_luke_docred_multi_gpu:
 		relation-classification run \
 		--data-dir=/hdd1/seokwon/data/DocRED/TACRED-style \
 		--setting document \
-		--train-batch-size=4 \
+		--train-batch-size=12 \
 		--gradient-accumulation-steps=8 \
 		--learning-rate=1e-5 \
 		--num-train-epochs=5 \
