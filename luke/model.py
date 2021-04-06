@@ -72,6 +72,9 @@ class EntityEmbeddings(nn.Module):
             head_mention_embeddings = position_embeddings[:, 0, :, :] # Get all head entity mentions.
             tail_mention_embeddings = position_embeddings[:, 1, :, :] # Get all tail entity mentions.
 
+            # head_entity_embeddings = torch.sum(head_mention_embeddings, dim=1, keepdim=True)
+            # tail_entity_embeddings = torch.sum(tail_mention_embeddings, dim=1, keepdim=True)
+
             head_entity_embeddings = torch.logsumexp(head_mention_embeddings, dim=1, keepdim=True)
             tail_entity_embeddings = torch.logsumexp(tail_mention_embeddings, dim=1, keepdim=True)
 
@@ -250,6 +253,7 @@ class LukeEntityAwareAttentionModel(LukeModel):
 class EntityAwareSelfAttention(nn.Module):
     def __init__(self, config):
         super(EntityAwareSelfAttention, self).__init__()
+        self.config = config
 
         self.num_attention_heads = config.num_attention_heads
         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
@@ -270,12 +274,16 @@ class EntityAwareSelfAttention(nn.Module):
         return x.view(*new_x_shape).permute(0, 2, 1, 3)
 
     def forward(self, word_hidden_states, entity_hidden_states, attention_mask):
+        """
+        word_hidden_states.shape = [batch_size, num_words, hidden_dim]
+        entity_hidden_states.shape = [batch_size, num_entities, hidden_dim]
+        """
         word_size = word_hidden_states.size(1)
 
-        w2w_query_layer = self.transpose_for_scores(self.query(word_hidden_states))
-        w2e_query_layer = self.transpose_for_scores(self.w2e_query(word_hidden_states))
-        e2w_query_layer = self.transpose_for_scores(self.e2w_query(entity_hidden_states))
-        e2e_query_layer = self.transpose_for_scores(self.e2e_query(entity_hidden_states))
+        w2w_query_layer = self.transpose_for_scores(self.query(word_hidden_states)) # [batch_size, num_attention_heads, word_size, head_size]
+        w2e_query_layer = self.transpose_for_scores(self.w2e_query(word_hidden_states)) # [batch_size, num_attention_heads, word_size, head_size]
+        e2w_query_layer = self.transpose_for_scores(self.e2w_query(entity_hidden_states)) # [batch_size, num_attention_heads, entity_size, head_size]
+        e2e_query_layer = self.transpose_for_scores(self.e2e_query(entity_hidden_states)) # [batch_size, num_attention_heads, entity_size, head_size]
 
         key_layer = self.transpose_for_scores(self.key(torch.cat([word_hidden_states, entity_hidden_states], dim=1)))
 
@@ -284,14 +292,14 @@ class EntityAwareSelfAttention(nn.Module):
         w2e_key_layer = key_layer[:, :, word_size:, :]
         e2e_key_layer = key_layer[:, :, word_size:, :]
 
-        w2w_attention_scores = torch.matmul(w2w_query_layer, w2w_key_layer.transpose(-1, -2))
-        w2e_attention_scores = torch.matmul(w2e_query_layer, w2e_key_layer.transpose(-1, -2))
-        e2w_attention_scores = torch.matmul(e2w_query_layer, e2w_key_layer.transpose(-1, -2))
-        e2e_attention_scores = torch.matmul(e2e_query_layer, e2e_key_layer.transpose(-1, -2))
+        w2w_attention_scores = torch.matmul(w2w_query_layer, w2w_key_layer.transpose(-1, -2)) # [batch_size, num_attention_heads, word_size, word_size]
+        w2e_attention_scores = torch.matmul(w2e_query_layer, w2e_key_layer.transpose(-1, -2)) # [batch_size, num_attention_heads, word_size, entity_size]
+        e2w_attention_scores = torch.matmul(e2w_query_layer, e2w_key_layer.transpose(-1, -2)) # [batch_size, num_attention_heads, entity_size, word_size]
+        e2e_attention_scores = torch.matmul(e2e_query_layer, e2e_key_layer.transpose(-1, -2)) # [batch_size, num_attention_heads, entity_size, entity_size]
 
-        word_attention_scores = torch.cat([w2w_attention_scores, w2e_attention_scores], dim=3)
-        entity_attention_scores = torch.cat([e2w_attention_scores, e2e_attention_scores], dim=3)
-        attention_scores = torch.cat([word_attention_scores, entity_attention_scores], dim=2)
+        word_attention_scores = torch.cat([w2w_attention_scores, w2e_attention_scores], dim=3) # [batch_size, num_attention_heads, word_size, word_size + entity_size]
+        entity_attention_scores = torch.cat([e2w_attention_scores, e2e_attention_scores], dim=3) # [batch_size, num_attention_heads, entity_size, word_size + entity_size]
+        attention_scores = torch.cat([word_attention_scores, entity_attention_scores], dim=2) # [batch_size, num_attention_heads, word_size + entity_size, word_size + enitity_size]
 
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
         attention_scores = attention_scores + attention_mask

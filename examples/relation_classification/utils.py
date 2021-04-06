@@ -71,13 +71,17 @@ class DocumentDatasetProcessor(object):
         return ['Na'] + sorted(labels)
 
     def _create_examples(self, data_dir, set_type, debug=False):
-        if debug:
-            filename = os.path.join(data_dir, set_type + '_debug.json')
-        elif not debug:
-            filename = os.path.join(data_dir, set_type + '.json')
+        # if debug:
+        #     filename = os.path.join(data_dir, set_type + '_debug.json')
+        # elif not debug:
+        #     filename = os.path.join(data_dir, set_type + '.json')
+        filename = os.path.join(data_dir, set_type + '.json')
 
         with open(file=filename) as f:
             data = json.load(f)
+
+        if debug:
+            data = data[:500]
 
         examples = []
         pbar = tqdm(iterable=data, desc=f"Processing document data for {set_type}", total=len(data))

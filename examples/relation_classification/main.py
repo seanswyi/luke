@@ -2,6 +2,7 @@ import json
 import logging
 import os
 from argparse import Namespace
+import pickle
 
 import click
 import torch
@@ -168,6 +169,7 @@ def evaluate(args, model, fold='dev', output_file=None):
     for label, prediction in zip(labels, predictions):
         if prediction != 0:
             num_predicted_labels += 1
+
         if label != 0:
             num_gold_labels += 1
             if prediction == label:
@@ -177,7 +179,9 @@ def evaluate(args, model, fold='dev', output_file=None):
         precision = num_correct_labels / num_predicted_labels
     else:
         precision = 0.0
+
     recall = num_correct_labels / num_gold_labels
+
     if recall == 0.0:
         f1 = 0.0
     else:
@@ -208,8 +212,26 @@ def load_examples(args, fold='train', setting='sentence'):
 
     label_list = processor.get_label_list(args.data_dir, examples=examples)
 
-    logger.info("Creating features from the dataset...")
-    features = convert_examples_to_features(examples, label_list, args.tokenizer, args.max_mention_length, setting=setting)
+    if (setting == 'document') and (not args.debug):
+        if os.path.exists(f'/hdd1/seokwon/data/DocRED/TACRED-style/features/{fold}_features.pkl'):
+            logger.info(f"Loading features from '/hdd1/seokwon/data/DocRED/TACRED-style/features/{fold}_features.pkl'")
+            with open(file=f'/hdd1/seokwon/data/DocRED/TACRED-style/features/{fold}_features.pkl', mode='rb') as f:
+                features = pickle.load(file=f)
+        else:
+            logger.info("Creating features from the dataset...")
+            features = convert_examples_to_features(examples, label_list, args.tokenizer, args.max_mention_length, setting=setting)
+    elif (setting == 'sentence') or args.debug:
+        logger.info("Creating features from the dataset...")
+        features = convert_examples_to_features(examples, label_list, args.tokenizer, args.max_mention_length, setting=setting)
+
+    # Remove features with word_ids longer than 514. ##############################################
+    filtered_features = []
+    for feature in features:
+        if len(features.word_ids) <= 514:
+            filtered_features.append(feature)
+
+    features = filtered_features
+    ###############################################################################################
 
     if args.local_rank == 0 and fold == "train":
         torch.distributed.barrier()
