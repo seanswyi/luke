@@ -104,7 +104,10 @@ class Trainer(object):
                             with amp.scale_loss(loss, optimizer) as scaled_loss:
                                 scaled_loss.backward()
                         else:
-                            loss.backward()
+                            if self.args.multi_gpu:
+                                loss.sum().backward()
+                            else:
+                                loss.backward()
 
                     tr_loss += loss.item()
 
