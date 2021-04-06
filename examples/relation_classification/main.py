@@ -237,6 +237,8 @@ def load_examples(args, fold='train', setting='sentence'):
         if len(feature.word_ids) < 514:
             filtered_features.append(feature)
 
+    filtered_count = len(features) - len(filtered_features)
+    logger.info(f"A total of {filtered_count} features were filtered out.")
     features = filtered_features
     ###############################################################################################
 
