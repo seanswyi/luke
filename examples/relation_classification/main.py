@@ -39,6 +39,7 @@ def cli():
 
 @click.option('--setting', default='sentence')
 @click.option('--debug/--no-debug', default=False)
+@click.option('--multi-gpu/--no-multi-gpu', default=False)
 
 @trainer_args
 @click.pass_obj
@@ -72,6 +73,10 @@ def run(common_args, **task_args):
     if args.do_train:
         model = LukeForRelationClassification(args, num_labels)
         model.load_state_dict(args.model_weights, strict=False)
+
+        if args.multi_gpu:
+            model = torch.nn.DataParallel(model)
+
         model.to(args.device)
 
         num_train_steps_per_epoch = len(train_dataloader) // args.gradient_accumulation_steps
@@ -227,8 +232,9 @@ def load_examples(args, fold='train', setting='sentence'):
     # Remove features with word_ids longer than 514. ##############################################
     logger.warning("Filtering out features with text longer than 514.")
     filtered_features = []
-    for feature in features:
-        if len(feature.word_ids) <= 514:
+    pbar = tqdm(iterable=features, desc=f"Filtering out long features for {setting}-{fold}")
+    for feature in pbar:
+        if len(feature.word_ids) < 514:
             filtered_features.append(feature)
 
     features = filtered_features
