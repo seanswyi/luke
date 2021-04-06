@@ -225,9 +225,10 @@ def load_examples(args, fold='train', setting='sentence'):
         features = convert_examples_to_features(examples, label_list, args.tokenizer, args.max_mention_length, setting=setting)
 
     # Remove features with word_ids longer than 514. ##############################################
+    logger.warning("Filtering out features with text longer than 514.")
     filtered_features = []
     for feature in features:
-        if len(features.word_ids) <= 514:
+        if len(feature.word_ids) <= 514:
             filtered_features.append(feature)
 
     features = filtered_features
