@@ -261,7 +261,8 @@ def convert_examples_to_features(examples, label_list, tokenizer, max_mention_le
             return tokenizer.tokenize(text)
 
     features = []
-    for example in tqdm(examples):
+    pbar = tqdm(iterable=examples, desc="Converting examples to features", total=len(examples))
+    for example in pbar:
         text = example.text
         entity_positions = example.entity_pos
         labels = example.labels
@@ -382,8 +383,13 @@ def convert_examples_to_features(examples, label_list, tokenizer, max_mention_le
 
         word_ids = tokenizer.convert_tokens_to_ids(tokens)
         word_ids = word_ids[:max_seq_length]
+
         word_attention_mask = [1] * len(tokens)
+        word_attention_mask = word_attention_mask[:max_seq_length]
+
         word_segment_ids = [0] * len(tokens)
+        word_segment_ids = word_segment_ids[:max_seq_length]
+
         entity_ids = [1, 2]
         entity_segment_ids = [0, 0]
         entity_attention_mask = [1, 1]
@@ -397,6 +403,17 @@ def convert_examples_to_features(examples, label_list, tokenizer, max_mention_le
 
         entity_position_ids = list(entity_position_ids.values())
 
+        luke_style_position_ids = []
+        for entity in entity_position_ids:
+            entity_full_idxs = []
+            for mention in entity:
+                mention_full_idxs = [-1] * max_mention_length
+                mention_idxs = list(range(mention[0], mention[1]))
+                mention_length = len(mention_idxs)
+                mention_full_idxs[:mention_length] = mention_idxs
+                entity_full_idxs.append(mention_full_idxs)
+            luke_style_position_ids.append(entity_full_idxs)
+
         labels_ = []
         for label in labels:
             labels_.append(np.argmax(label))
@@ -405,7 +422,7 @@ def convert_examples_to_features(examples, label_list, tokenizer, max_mention_le
                                 word_segment_ids=word_segment_ids,
                                 word_attention_mask=word_attention_mask,
                                 entity_ids=entity_ids,
-                                entity_position_ids=entity_position_ids,
+                                entity_position_ids=luke_style_position_ids,
                                 entity_segment_ids=entity_segment_ids,
                                 entity_attention_mask=entity_attention_mask,
                                 label=labels_,

@@ -91,7 +91,8 @@ class Trainer(object):
         with tqdm(total=self.num_train_steps, disable=self.args.local_rank not in (-1, 0)) as pbar:
             while True:
                 for step, batch in enumerate(self.dataloader):
-                    inputs = {k: v.to(self.args.device) for k, v in self._create_model_arguments(batch).items()}
+                    # inputs = {k: v.to(self.args.device) for k, v in self._create_model_arguments(batch).items()}
+                    inputs = {attribute_name: value for attribute_name, value in self._create_model_arguments(batch).items()}
 
                     outputs = model(**inputs)
                     loss = outputs[0]
@@ -109,7 +110,10 @@ class Trainer(object):
                             else:
                                 loss.backward()
 
-                    tr_loss += loss.item()
+                    if self.args.multi_gpu:
+                        tr_loss += loss.sum().item()
+                    else:
+                        tr_loss += loss.item()
 
                     if (step + 1) % self.args.gradient_accumulation_steps == 0:
                         if self.args.max_grad_norm != 0.0:
@@ -122,7 +126,10 @@ class Trainer(object):
                         self.scheduler.step()
                         model.zero_grad()
 
-                        pbar.set_description("epoch: %d loss: %.7f" % (epoch, loss.item()))
+                        if self.args.multi_gpu:
+                            pbar.set_description("epoch: %d loss: %.7f" % (epoch, loss.sum().item()))
+                        else:
+                            pbar.set_description("epoch: %d loss: %.7f" % (epoch, loss.item()))
                         pbar.update()
                         global_step += 1
 

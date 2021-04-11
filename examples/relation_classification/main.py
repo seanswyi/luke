@@ -79,6 +79,8 @@ def run(common_args, **task_args):
 
         model.to(args.device)
 
+        import pdb; pdb.set_trace()
+
         num_train_steps_per_epoch = len(train_dataloader) // args.gradient_accumulation_steps
         num_train_steps = int(num_train_steps_per_epoch * args.num_train_epochs)
 
@@ -233,12 +235,13 @@ def load_examples(args, fold='train', setting='sentence'):
     logger.warning("Filtering out features with text longer than 514.")
     filtered_features = []
     pbar = tqdm(iterable=features, desc=f"Filtering out long features for {setting}-{fold}")
+    count = 0
     for feature in pbar:
-        if len(feature.word_ids) < 514:
+        if len(feature.word_ids) < 513:
             filtered_features.append(feature)
+            count += 1
 
-    filtered_count = len(features) - len(filtered_features)
-    logger.info(f"A total of {filtered_count} features were filtered out.")
+    logger.info(f"A total of {count} samples remain.")
     features = filtered_features
     ###############################################################################################
 

@@ -117,8 +117,8 @@ class LukeModel(nn.Module):
         word_seq_size = word_ids.size(1)
 
         embedding_output = self.embeddings(word_ids, word_segment_ids)
-
         attention_mask = self._compute_extended_attention_mask(word_attention_mask, entity_attention_mask)
+
         if entity_ids is not None:
             entity_embedding_output = self.entity_embeddings(entity_ids, entity_position_ids, entity_segment_ids)
             embedding_output = torch.cat([embedding_output, entity_embedding_output], dim=1)
@@ -222,11 +222,24 @@ class LukeEntityAwareAttentionModel(LukeModel):
         entity_segment_ids,
         entity_attention_mask,
     ):
-        word_embeddings = self.embeddings(word_ids, word_segment_ids)
-        entity_embeddings = self.entity_embeddings(entity_ids, entity_position_ids, entity_segment_ids)
-        attention_mask = self._compute_extended_attention_mask(word_attention_mask, entity_attention_mask)
+        word_ids = word_ids.to(self.args.device)
+        word_segment_ids = word_segment_ids.to(self.args.device)
+        word_attention_mask = word_attention_mask.to(self.args.device)
+        entity_ids = entity_ids.to(self.args.device)
+        entity_position_ids = entity_position_ids.to(self.args.device)
+        entity_segment_ids = entity_segment_ids.to(self.args.device)
+        entity_attention_mask = entity_attention_mask.to(self.args.device)
 
-        return self.encoder(word_embeddings, entity_embeddings, attention_mask)
+        import pdb; pdb.set_trace()
+
+        word_embeddings = self.embeddings(word_ids, word_segment_ids) # [batch_size, word_size, emb_dim]
+        entity_embeddings = self.entity_embeddings(entity_ids, entity_position_ids, entity_segment_ids) # [batch_size, entity_size, emb_dim]
+        attention_mask = self._compute_extended_attention_mask(word_attention_mask, entity_attention_mask) # [batch_size, 1, 1, word_size + entity_size]
+
+        import pdb; pdb.set_trace()
+        encoded_output = self.encoder(word_embeddings, entity_embeddings, attention_mask)
+
+        return encoded_output
 
     def load_state_dict(self, state_dict, *args, **kwargs):
         new_state_dict = state_dict.copy()
@@ -310,11 +323,11 @@ class EntityAwareSelfAttention(nn.Module):
         value_layer = self.transpose_for_scores(
             self.value(torch.cat([word_hidden_states, entity_hidden_states], dim=1))
         )
-        context_layer = torch.matmul(attention_probs, value_layer)
+        context_layer = torch.matmul(attention_probs, value_layer) # [batch_size, num_attention_heads, word_size + entity_size, attention_size]
 
-        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
-        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
-        context_layer = context_layer.view(*new_context_layer_shape)
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous() # [batch_size, word_size + entity_size, num_attention_heads, attention_size]
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,) # [batch_size, word_size + entity_size, all_head_size] -> 1,024
+        context_layer = context_layer.view(*new_context_layer_shape) # [batch_size, word_size + entity_size, hidden_dim]
 
         return context_layer[:, :word_size, :], context_layer[:, word_size:, :]
 
@@ -327,10 +340,13 @@ class EntityAwareAttention(nn.Module):
 
     def forward(self, word_hidden_states, entity_hidden_states, attention_mask):
         word_self_output, entity_self_output = self.self(word_hidden_states, entity_hidden_states, attention_mask)
+        import pdb; pdb.set_trace()
         hidden_states = torch.cat([word_hidden_states, entity_hidden_states], dim=1)
         self_output = torch.cat([word_self_output, entity_self_output], dim=1)
+
         output = self.output(self_output, hidden_states)
-        return output[:, : word_hidden_states.size(1), :], output[:, word_hidden_states.size(1) :, :]
+
+        return output[:, :word_hidden_states.size(1), :], output[:, word_hidden_states.size(1):, :]
 
 
 class EntityAwareLayer(nn.Module):
@@ -349,7 +365,7 @@ class EntityAwareLayer(nn.Module):
         intermediate_output = self.intermediate(attention_output)
         layer_output = self.output(intermediate_output, attention_output)
 
-        return layer_output[:, : word_hidden_states.size(1), :], layer_output[:, word_hidden_states.size(1) :, :]
+        return layer_output[:, :word_hidden_states.size(1), :], layer_output[:, word_hidden_states.size(1):, :]
 
 
 class EntityAwareEncoder(nn.Module):

@@ -25,7 +25,8 @@ run_luke_docred:
 		relation-classification run \
 		--data-dir=/hdd1/seokwon/data/DocRED/TACRED-style \
 		--setting document \
-		--train-batch-size=4 \
+		--train-batch-size=2 \
+		--eval-batch-size=4 \
 		--gradient-accumulation-steps=8 \
 		--learning-rate=1e-5 \
 		--num-train-epochs=5
@@ -37,10 +38,44 @@ run_luke_docred_multi_gpu:
 		relation-classification run \
 		--data-dir=/hdd1/seokwon/data/DocRED/TACRED-style \
 		--setting document \
-		--train-batch-size=12 \
+		--train-batch-size=2 \
 		--gradient-accumulation-steps=8 \
 		--learning-rate=1e-5 \
-		--num-train-epochs=5 \
+		--num-train-epochs=1 \
+		--multi-gpu
+
+run_docred:
+	python -m examples.cli \
+		--model-file=/hdd1/seokwon/research/luke/luke_large_500k.tar.gz \
+		--output-dir=/hdd1/seokwon/research/luke \
+		docred run \
+		--data-dir=/hdd1/seokwon/data/DocRED/original \
+		--train-batch-size=6 \
+		--gradient-accumulation-steps=8 \
+		--learning-rate=${lr} \
+		--num-train-epochs=30
+
+run_docred_debug:
+	python -m examples.cli \
+		--model-file=/hdd1/seokwon/research/luke/luke_large_500k.tar.gz \
+		--output-dir=/hdd1/seokwon/research/luke \
+		docred run \
+		--data-dir=/hdd1/seokwon/data/DocRED/original \
+		--train-batch-size=1 \
+		--gradient-accumulation-steps=1 \
+		--learning-rate=1e-5 \
+		--num-train-epochs=5
+
+run_docred_multi_gpu:
+	python -m examples.cli \
+		--model-file=/hdd1/seokwon/research/luke/luke_large_500k.tar.gz \
+		--output-dir=/hdd1/seokwon/research/luke \
+		docred run \
+		--data-dir=/hdd1/seokwon/data/DocRED/original \
+		--train-batch-size=4 \
+		--gradient-accumulation-steps=8 \
+		--learning-rate=1e-5 \
+		--num-train-epochs=1 \
 		--multi-gpu
 
 run_luke_docred_single_batch:
@@ -67,3 +102,14 @@ debug_luke_docred:
 		--learning-rate=1e-5 \
 		--num-train-epochs=5 \
 		--debug
+
+run_luke_conll:
+	python -m examples.cli \
+		--model-file=/hdd1/seokwon/research/luke/luke_large_500k.tar.gz \
+		--output-dir=/hdd1/seokwon/research/luke \
+		ner run \
+		--data-dir=/hdd1/seokwon/data/CoNLL-2003 \
+		--train-batch-size=2 \
+		--gradient-accumulation-steps=2 \
+		--learning-rate=1e-5 \
+		--num-train-epochs=5

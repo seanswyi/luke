@@ -128,5 +128,8 @@ from .entity_span_qa.main import cli as entity_span_qa_cli
 
 cli.add_command(entity_span_qa_cli)
 
+from .docred.main import cli as docred_cli
+cli.add_command(docred_cli)
+
 if __name__ == '__main__':
     cli()

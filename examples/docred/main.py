@@ -47,10 +47,13 @@ def cli():
 
 
 def run(common_args, **task_args):
-    wandb.init(project="LUKE DocRED", name="logsumexp")
     logger.info("Started process.")
     task_args.update(common_args)
     args = Namespace(**task_args)
+
+    lr = args.learning_rate
+    num_epochs = args.num_train_epochs
+    wandb.init(project="LUKE DocRED", name=f'DocRED_{lr}_{num_epochs}')
 
     set_seed(args.seed)
 
@@ -82,10 +85,11 @@ def run(common_args, **task_args):
 
         model.to(args.device)
 
-        import pdb; pdb.set_trace()
-
         num_train_steps_per_epoch = len(train_dataloader) // args.gradient_accumulation_steps
         num_train_steps = int(num_train_steps_per_epoch * args.num_train_epochs)
+
+        logger.info(f"num_train_steps_per_epoch = {num_train_steps_per_epoch}")
+        logger.info(f"num_train_steps = {num_train_steps}")
 
         best_dev_f1 = [-1]
         best_weights = [None]
@@ -134,14 +138,14 @@ def run(common_args, **task_args):
             model.load_state_dict(torch.load(os.path.join(args.output_dir, WEIGHTS_NAME), map_location="cpu"))
         model.to(args.device)
 
-        if args.setting == 'sentence':
-            eval_sets = ['dev', 'test']
-        elif args.setting == 'document':
-            eval_sets = ['dev']
+        # if args.setting == 'sentence':
+        #     eval_sets = ['dev', 'test']
+        # elif args.setting == 'document':
+        eval_sets = ['dev']
 
-        for eval_set in eval_sets:
-            output_file = os.path.join(args.output_dir, f'{eval_set}_predictions.txt')
-            results.update({f'{eval_set}_{k}': v for k, v in evaluate(args, model, eval_set, output_file).items()})
+        # for eval_set in eval_sets:
+        #     output_file = os.path.join(args.output_dir, f'{eval_set}_predictions.txt')
+        #     results.update({f'{eval_set}_{k}': v for k, v in evaluate(args, model, eval_set, output_file).items()})
 
     logger.info("Results: %s", json.dumps(results, indent=2, sort_keys=True))
     args.experiment.log_metrics(results)
@@ -160,12 +164,15 @@ def evaluate(args, model, fold='dev', output_file=None):
 
     model.eval()
     for batch in tqdm(dataloader, desc=fold):
-        inputs = {k: v.to(args.device) for k, v in batch.items() if k != 'label'}
+        # inputs = {k: v.to(args.device) for k, v in batch.items() if k != 'label'}
+        inputs = {attribute_name: value for attribute_name, value in batch.items() if attribute_name != 'label'}
+
         with torch.no_grad():
             logits = model(**inputs)
 
         predictions.extend(logits.detach().cpu().numpy().argmax(axis=1))
-        labels.extend(batch['label'].to('cpu').tolist())
+        labels.extend(sum(batch['label'], []))
+        # labels.extend(batch['label'].to('cpu').tolist())
 
     if output_file:
         with open(file=output_file, mode='w') as f:
@@ -177,11 +184,11 @@ def evaluate(args, model, fold='dev', output_file=None):
     num_correct_labels = 0
 
     for label, prediction in zip(labels, predictions):
-        if prediction != 0:
-            num_predicted_labels += 1
+        if prediction != 0: # Positive
+            num_predicted_labels += 1 # Number of positive predictions.
 
         if label != 0:
-            num_gold_labels += 1
+            num_gold_labels += 1 # Number of true samples (regardless of prediction).
             if prediction == label:
                 num_correct_labels += 1
 
@@ -197,7 +204,10 @@ def evaluate(args, model, fold='dev', output_file=None):
     else:
         f1 = 2 * precision * recall / (precision + recall)
 
-    return dict(precision=precision, recall=recall, f1=f1)
+    results = dict(precision=precision, recall=recall, f1=f1)
+    wandb.log(results)
+
+    return results
 
 
 def load_examples(args, fold='train'):
@@ -230,15 +240,20 @@ def load_examples(args, fold='train'):
 
             return padded_tensor
 
+        entity_position_ids = [getattr(x, 'entity_position_ids') for x in batch]
+        label = [getattr(x, 'label') for x in batch]
+        head_tail_idxs = [getattr(x, 'head_tail_idxs') for x in batch]
+
         return dict(
             word_ids=create_padded_sequence("word_ids", args.tokenizer.pad_token_id),
             word_attention_mask=create_padded_sequence("word_attention_mask", 0),
             word_segment_ids=create_padded_sequence("word_segment_ids", 0),
             entity_ids=create_padded_sequence("entity_ids", 0),
             entity_attention_mask=create_padded_sequence("entity_attention_mask", 0),
-            entity_position_ids=create_padded_sequence("entity_position_ids", -1),
+            entity_position_ids=entity_position_ids,
             entity_segment_ids=create_padded_sequence("entity_segment_ids", 0),
-            label=torch.tensor([o.label for o in batch], dtype=torch.long),
+            label=label,
+            head_tail_idxs=head_tail_idxs
         )
 
     if fold in ['dev', 'test']:
