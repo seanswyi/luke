@@ -13,6 +13,7 @@ from tqdm import tqdm
 from transformers import WEIGHTS_NAME
 import wandb
 
+from .docred_evaluation import convert_to_official_format, docred_official_evaluate
 from luke.utils.entity_vocab import MASK_TOKEN
 from ..utils import set_seed
 from ..utils.trainer import Trainer, trainer_args
@@ -33,7 +34,7 @@ def cli():
 @click.option("--data-dir", default="data/tacred", type=click.Path(exists=True))
 @click.option("--do-eval/--no-eval", default=True)
 @click.option("--do-train/--no-train", default=True)
-@click.option("--eval-batch-size", default=128)
+@click.option("--eval-batch-size", default=12)
 @click.option("--num-train-epochs", default=5.0)
 @click.option("--seed", default=42)
 @click.option("--train-batch-size", default=4)
@@ -41,6 +42,10 @@ def cli():
 @click.option('--setting', default='sentence')
 @click.option('--debug/--no-debug', default=False)
 @click.option('--multi-gpu/--no-multi-gpu', default=False)
+@click.option('--aggregation_type', default='sum')
+@click.option('--classifier', default='linear')
+@click.option('--at_loss/--no-at_loss', default=False)
+@click.option('--lop/--no-lop', default=False)
 
 @trainer_args
 @click.pass_obj
@@ -51,9 +56,16 @@ def run(common_args, **task_args):
     task_args.update(common_args)
     args = Namespace(**task_args)
 
+    args.model_config.output_attentions = True
+
     lr = args.learning_rate
     num_epochs = args.num_train_epochs
-    wandb.init(project="LUKE DocRED", name=f'DocRED_{lr}_{num_epochs}')
+    classifier_type = args.classifier
+
+    if args.at_loss:
+        wandb.init(project="LUKE DocRED", name=f'DocRED_{lr}_atloss_{classifier_type}_{int(num_epochs)}')
+    elif not args.at_loss:
+        wandb.init(project="LUKE DocRED", name=f'DocRED_{lr}_{classifier_type}_{int(num_epochs)}')
 
     set_seed(args.seed)
 
@@ -97,27 +109,23 @@ def run(common_args, **task_args):
         def step_callback(model, global_step):
             if global_step % num_train_steps_per_epoch == 0 and args.local_rank in (0, -1):
                 epoch = int(global_step / num_train_steps_per_epoch - 1)
-                dev_results = evaluate(args, model, fold="dev")
+                dev_normal_scores, dev_ignore_scores = evaluate(args, model, fold='dev')
 
-                wandb.log(dev_results)
+                results.update({f'dev_{k}_epoch{epoch}': v for k, v in dev_normal_scores.items()})
+                tqdm.write(f"dev | P: {dev_normal_scores['precision']} R: {dev_normal_scores['recall']} F1: {dev_normal_scores['f1']}")
 
-                args.experiment.log_metrics({f"dev_{k}_epoch{epoch}": v for k, v in dev_results.items()}, epoch=epoch)
-                results.update({f"dev_{k}_epoch{epoch}": v for k, v in dev_results.items()})
-                tqdm.write("dev: " + str(dev_results))
-
-                if dev_results["f1"] > best_dev_f1[0]:
-                    if hasattr(model, "module"):
-                        best_weights[0] = {k: v.to("cpu").clone() for k, v in model.module.state_dict().items()}
+                if dev_normal_scores['f1'] > best_dev_f1[0]:
+                    if hasattr(model, 'module'):
+                        best_weights[0] = {k: v.to('cpu').clone() for k, v in model.module.state_dict().items()}
                     else:
-                        best_weights[0] = {k: v.to("cpu").clone() for k, v in model.state_dict().items()}
-                    best_dev_f1[0] = dev_results["f1"]
-                    results["best_epoch"] = epoch
+                        best_weights[0] = {k: v.to('cpu').clone() for k, v in model.state_dict().items()}
+
+                    best_dev_f1[0] = dev_normal_scores['f1']
+                    results['best_epoch'] = epoch
 
                 model.train()
 
-        trainer = Trainer(
-            args, model=model, dataloader=train_dataloader, num_train_steps=num_train_steps, step_callback=step_callback
-        )
+        trainer = Trainer(args, model=model, dataloader=train_dataloader, num_train_steps=num_train_steps, step_callback=step_callback)
         trainer.train()
 
     if args.do_train and args.local_rank in (0, -1):
@@ -138,14 +146,7 @@ def run(common_args, **task_args):
             model.load_state_dict(torch.load(os.path.join(args.output_dir, WEIGHTS_NAME), map_location="cpu"))
         model.to(args.device)
 
-        # if args.setting == 'sentence':
-        #     eval_sets = ['dev', 'test']
-        # elif args.setting == 'document':
         eval_sets = ['dev']
-
-        # for eval_set in eval_sets:
-        #     output_file = os.path.join(args.output_dir, f'{eval_set}_predictions.txt')
-        #     results.update({f'{eval_set}_{k}': v for k, v in evaluate(args, model, eval_set, output_file).items()})
 
     logger.info("Results: %s", json.dumps(results, indent=2, sort_keys=True))
     args.experiment.log_metrics(results)
@@ -158,13 +159,12 @@ def run(common_args, **task_args):
 
 
 def evaluate(args, model, fold='dev', output_file=None):
-    dataloader, _, _, label_list = load_examples(args, fold=fold)
+    dataloader, _, features, label_list = load_examples(args, fold=fold)
     predictions = []
     labels = []
 
     model.eval()
     for batch in tqdm(dataloader, desc=fold):
-        # inputs = {k: v.to(args.device) for k, v in batch.items() if k != 'label'}
         inputs = {attribute_name: value for attribute_name, value in batch.items() if attribute_name != 'label'}
 
         with torch.no_grad():
@@ -172,42 +172,23 @@ def evaluate(args, model, fold='dev', output_file=None):
 
         predictions.extend(logits.detach().cpu().numpy().argmax(axis=1))
         labels.extend(sum(batch['label'], []))
-        # labels.extend(batch['label'].to('cpu').tolist())
 
-    if output_file:
-        with open(file=output_file, mode='w') as f:
-            for prediction in predictions:
-                f.write(label_list[prediction] + '\n')
+    official_format_predictions = convert_to_official_format(predictions, features)
 
-    num_predicted_labels = 0
-    num_gold_labels = 0
-    num_correct_labels = 0
-
-    for label, prediction in zip(labels, predictions):
-        if prediction != 0: # Positive
-            num_predicted_labels += 1 # Number of positive predictions.
-
-        if label != 0:
-            num_gold_labels += 1 # Number of true samples (regardless of prediction).
-            if prediction == label:
-                num_correct_labels += 1
-
-    if num_predicted_labels > 0:
-        precision = num_correct_labels / num_predicted_labels
+    if len(official_format_predictions) > 0:
+        normal_scores, ignore_scores = docred_official_evaluate(official_format_predictions, args.data_dir)
     else:
-        precision = 0.0
+        normal_scores = {'precision': 0.0,
+                         'recall': 0.0,
+                         'f1': 0.0}
+        ignore_scores = {'ign_precision': 0.0,
+                         'ign_recall': 0.0,
+                         'ign_f1': 0.0}
 
-    recall = num_correct_labels / num_gold_labels
+    wandb.log(normal_scores)
+    wandb.log(ignore_scores)
 
-    if recall == 0.0:
-        f1 = 0.0
-    else:
-        f1 = 2 * precision * recall / (precision + recall)
-
-    results = dict(precision=precision, recall=recall, f1=f1)
-    wandb.log(results)
-
-    return results
+    return normal_scores, ignore_scores
 
 
 def load_examples(args, fold='train'):

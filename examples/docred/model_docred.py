@@ -18,6 +18,9 @@ from transformers.modeling_bert import (
 )
 from transformers.modeling_roberta import RobertaEmbeddings
 
+from .process_long_seq import process_long_input
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,6 +32,8 @@ class LukeConfig(BertConfig):
 
         self.entity_vocab_size = entity_vocab_size
         self.bert_model_name = bert_model_name
+        self.output_attentions = True
+
         if entity_emb_size is None:
             self.entity_emb_size = self.hidden_size
         else:
@@ -102,6 +107,14 @@ class LukeModelDoc(nn.Module):
             self.embeddings = BertEmbeddings(config)
         self.entity_embeddings = EntityEmbeddings(config)
 
+    def encode(self, input_ids, attention_mask):
+        start_tokens = [config.cls_token_id]
+        end_tokens = [config.sep_token_id]
+
+        sequence_output, attention = process_long_input(self.encoder, input_ids, attention_mask, start_tokens, end_tokens)
+
+        return sequence_output, attention
+
     def forward(
         self,
         word_ids: torch.LongTensor,
@@ -115,23 +128,128 @@ class LukeModelDoc(nn.Module):
     ):
         word_seq_size = word_ids.size(1)
 
-        embedding_output = self.embeddings(word_ids, word_segment_ids) # [batch_size, word_size, hidden_dim]
-        attention_mask = self._compute_extended_attention_mask(word_attention_mask, entity_attention_mask) # [batch_size, 1, 1, word_size]
+        start_tokens = torch.tensor([self.args.tokenizer.cls_token_id]).to(word_ids)
+        end_tokens = torch.tensor([self.args.tokenizer.sep_token_id]).to(word_ids)
+        start_length = start_tokens.shape[0]
+        end_length = end_tokens.shape[0]
 
-        if entity_ids is not None:
-            entity_embedding_output = self.entity_embeddings(entity_ids, entity_position_ids, entity_segment_ids)
-            embedding_output = torch.cat([embedding_output, entity_embedding_output], dim=1)
+        if word_seq_size <= 512:
+            embedding_output = self.embeddings(word_ids)
+            attention_mask = self._compute_extended_attention_mask(word_attention_mask, entity_attention_mask) # [batch_size, 1, 1, word_size]
 
-        encoder_outputs = self.encoder(embedding_output, attention_mask, [None] * self.config.num_hidden_layers)
-        sequence_output = encoder_outputs[0]
-        word_sequence_output = sequence_output[:, :word_seq_size, :]
-        pooled_output = self.pooler(sequence_output)
+            if entity_ids is not None:
+                entity_embedding_output = self.entity_embeddings(entity_ids, entity_position_ids, entity_segment_ids)
+                embedding_output = torch.cat([embedding_output, entity_embedding_output], dim=1)
 
-        if entity_ids is not None:
-            entity_sequence_output = sequence_output[:, word_seq_size:, :]
-            return (word_sequence_output, entity_sequence_output, pooled_output,) + encoder_outputs[1:]
-        else:
-            return (word_sequence_output, pooled_output,) + encoder_outputs[1:]
+            encoder_outputs = self.encoder(embedding_output, attention_mask=attention_mask, head_mask=([None] * self.config.num_hidden_layers))
+
+            sequence_output = encoder_outputs[0]
+            attention_output = encoder_outputs[-1][-1]
+
+            pooled_output = self.pooler(sequence_output)
+
+            word_sequence_output = sequence_output[:, :word_seq_size, :]
+
+            if entity_ids:
+                entity_sequence_output = sequence_output[:, word_seq_size:, :]
+                output = (word_sequence_output, entity_sequence_output, pooled_output, attention_output)
+            else:
+                output = (word_sequence_output, pooled_output, attention_output)
+        elif word_seq_size > 512:
+            new_word_ids = []
+            new_attention_mask = []
+            # new_word_segment_ids = []
+            num_segments = []
+
+            sequence_lengths = word_attention_mask.sum(1).detach().cpu().numpy().tolist()
+            for idx, sequence_length in enumerate(sequence_lengths):
+                if sequence_length <= 512:
+                    new_word_ids.append(word_ids[idx, :512])
+                    new_attention_mask.append(word_attention_mask[idx, :512])
+                    num_segments.append(1)
+                elif sequence_length > 512:
+                    word_ids1 = torch.cat([word_ids[idx, :512 - end_length], end_tokens], dim=-1)
+                    word_ids2 = torch.cat([start_tokens, word_ids[idx, (sequence_length - 512 + start_length):sequence_length]], dim=-1)
+
+                    word_attention_mask1 = word_attention_mask[idx, :512]
+                    word_attention_mask2 = word_attention_mask[idx, (sequence_length - 512):sequence_length]
+
+                    # word_segment_ids1 = word_segment_ids[idx, :512]
+                    # word_segment_ids2 = word_segment_ids[idx, (sequence_length - 512):sequence_length]
+
+                    new_word_ids.extend([word_ids1, word_ids2])
+                    new_attention_mask.extend([word_attention_mask1, word_attention_mask2])
+                    # new_word_segment_ids.extend([word_segment_ids1, word_segment_ids2])
+                    num_segments.append(2)
+
+            word_ids = torch.stack(new_word_ids, dim=0)
+            word_attention_mask = torch.stack(new_attention_mask, dim=0)
+            # word_segment_ids = torch.stack(new_word_segment_ids, dim=0)
+
+            embedding_output = self.embeddings(word_ids)
+            attention_mask = self._compute_extended_attention_mask(word_attention_mask, entity_attention_mask) # [batch_size, 1, 1, word_size]
+
+            if entity_ids is not None:
+                entity_embedding_output = self.entity_embeddings(entity_ids, entity_position_ids, entity_segment_ids)
+                embedding_output = torch.cat([embedding_output, entity_embedding_output], dim=1)
+
+            encoder_outputs = self.encoder(embedding_output, attention_mask=attention_mask, head_mask=([None] * self.config.num_hidden_layers))
+
+            sequence_output = encoder_outputs[0]
+            attention_output = encoder_outputs[-1][-1]
+
+            current_idx = 0
+            new_sequence_output = []
+            new_attention_output = []
+
+            for num_segment, sequence_length in zip(num_segments, sequence_lengths):
+                if num_segment == 1:
+                    output = F.pad(sequence_output[current_idx], (0, 0, 0, word_seq_size - 512))
+                    attention = F.pad(attention_output[current_idx], (0, word_seq_size - 512, 0, word_seq_size - 512))
+
+                    new_sequence_output.append(output)
+                    new_attention_output.append(attention)
+                elif num_segment == 2:
+                    output1 = sequence_output[current_idx][:512 - end_length]
+                    mask1 = word_attention_mask[current_idx][:512 - end_length]
+                    attention1 = attention_output[current_idx][:, :512 - end_length, :512 - end_length]
+                    output1 = F.pad(output1, (0, 0, 0, word_seq_size - 512 + end_length))
+                    mask1 = F.pad(mask1, (0, word_seq_size - 512 + end_length))
+                    attention1 = F.pad(attention1, (0, word_seq_size - 512 + end_length, 0, word_seq_size - 512 + end_length))
+
+                    output2 = sequence_output[current_idx + 1][start_length:]
+                    mask2 = word_attention_mask[current_idx + 1][start_length:]
+                    attention2 = attention_output[current_idx + 1][:, start_length:, start_length:]
+                    output2 = F.pad(output2, (0, 0, sequence_length - 512 + start_length, word_seq_size - sequence_length))
+                    mask2 = F.pad(mask2, (sequence_length - 512 + start_length, word_seq_size - sequence_length))
+                    attention2 = F.pad(attention2, [sequence_length - 512 + start_length, word_seq_size - sequence_length, sequence_length - 512 + start_length, word_seq_size - sequence_length])
+
+                    mask = mask1 + mask2 + 1e-10
+                    output = (output1 + output2) / mask.unsqueeze(-1).float()
+                    attention = attention1 + attention2
+                    attention = attention / (attention.sum(-1, keepdim=True) + 1e-10)
+
+                    new_sequence_output.append(output)
+                    new_attention_output.append(attention)
+
+                current_idx += num_segment
+
+            sequence_output = torch.stack(new_sequence_output, dim=0)
+            attention_output = torch.stack(new_attention_output, dim=0)
+
+            assert sequence_output.shape[1] == attention_output.shape[-1] == word_seq_size
+
+            pooled_output = self.pooler(sequence_output)
+
+            word_sequence_output = sequence_output[:, :word_seq_size, :]
+
+            if entity_ids:
+                entity_sequence_output = sequence_output[:, word_seq_size:, :]
+                output = (word_sequence_output, entity_sequence_output, pooled_output, attention_output)
+            else:
+                output = (word_sequence_output, pooled_output, attention_output)
+
+        return output
 
     def init_weights(self, module: nn.Module):
         if isinstance(module, nn.Linear):

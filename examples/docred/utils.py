@@ -49,6 +49,7 @@ class InputExample(object):
 class InputFeatures(object):
     def __init__(
         self,
+        title,
         word_ids,
         word_segment_ids,
         word_attention_mask,
@@ -59,6 +60,7 @@ class InputFeatures(object):
         label,
         head_tail_idxs
     ):
+        self.title = title
         self.word_ids = word_ids
         self.word_segment_ids = word_segment_ids
         self.word_attention_mask = word_attention_mask
@@ -193,6 +195,7 @@ class DatasetProcessor(object):
             sentences = item['sents']
             triplets = item['labels']
             entities = adjust_mention_positions(entities=item['vertexSet'], text=sentences)
+            title = item['title']
 
             entity_pos = []
             for entity in entities:
@@ -241,7 +244,7 @@ class DatasetProcessor(object):
                         relations.append(relation)
                         head_tail_pairs.append(head_tail_pair)
 
-            example = InputExample(f'{set_type}-{i}',
+            example = InputExample(f'{title}', # Need to change this to be title.
                                    ' '.join(whole_text),
                                    entity_pos,
                                    head_tail_pairs,
@@ -267,6 +270,7 @@ def convert_examples_to_features(examples, label_list, tokenizer, max_mention_le
         entity_positions = example.entity_pos
         labels = example.labels
         head_tail_idxs = example.head_tail_idxs
+        title = example.id.split('-')[0]
 
         # Ensuring mention positions are in ascending order is crucial, otherwise the spans will get messed up.
         for idx, entity in enumerate(entity_positions):
@@ -353,7 +357,7 @@ def convert_examples_to_features(examples, label_list, tokenizer, max_mention_le
         ###########################################################################################
 
         # Get token-level spans. ##################################################################
-        tokens = []
+        tokens = [tokenizer.cls_token]
         current_idx = 0
         token_lvl_spans = []
         for idx, id_span in enumerate(all_spans):
@@ -378,17 +382,17 @@ def convert_examples_to_features(examples, label_list, tokenizer, max_mention_le
 
             current_idx = end
 
-        tokens += tokenize(entity_marked_text[current_idx:])
+        tokens += tokenize(entity_marked_text[current_idx:]) + [tokenizer.sep_token]
         ###########################################################################################
 
         word_ids = tokenizer.convert_tokens_to_ids(tokens)
-        word_ids = word_ids[:max_seq_length]
+        # word_ids = word_ids[:max_seq_length]
 
         word_attention_mask = [1] * len(tokens)
-        word_attention_mask = word_attention_mask[:max_seq_length]
+        # word_attention_mask = word_attention_mask[:max_seq_length]
 
         word_segment_ids = [0] * len(tokens)
-        word_segment_ids = word_segment_ids[:max_seq_length]
+        # word_segment_ids = word_segment_ids[:max_seq_length]
 
         entity_ids = [1, 2]
         entity_segment_ids = [0, 0]
@@ -418,7 +422,8 @@ def convert_examples_to_features(examples, label_list, tokenizer, max_mention_le
         for label in labels:
             labels_.append(np.argmax(label))
 
-        feature = InputFeatures(word_ids=word_ids,
+        feature = InputFeatures(title=title,
+                                word_ids=word_ids,
                                 word_segment_ids=word_segment_ids,
                                 word_attention_mask=word_attention_mask,
                                 entity_ids=entity_ids,

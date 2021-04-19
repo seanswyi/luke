@@ -50,10 +50,37 @@ run_docred:
 		--output-dir=/hdd1/seokwon/research/luke \
 		docred run \
 		--data-dir=/hdd1/seokwon/data/DocRED/original \
-		--train-batch-size=6 \
+		--train-batch-size=2 \
 		--gradient-accumulation-steps=8 \
 		--learning-rate=${lr} \
-		--num-train-epochs=30
+		--num-train-epochs=${epochs} \
+		--classifier=${classifier}
+
+run_docred_atloss:
+	python -m examples.cli \
+		--model-file=/hdd1/seokwon/research/luke/luke_large_500k.tar.gz \
+		--output-dir=/hdd1/seokwon/research/luke \
+		docred run \
+		--data-dir=/hdd1/seokwon/data/DocRED/original \
+		--train-batch-size=4 \
+		--gradient-accumulation-steps=8 \
+		--learning-rate=${lr} \
+		--num-train-epochs=${epochs} \
+		--classifier=${classifier} \
+		--at_loss
+
+run_docred_lop:
+	python -m examples.cli \
+		--model-file=/hdd1/seokwon/research/luke/luke_large_500k.tar.gz \
+		--output-dir=/hdd1/seokwon/research/luke \
+		docred run \
+		--data-dir=/hdd1/seokwon/data/DocRED/original \
+		--train-batch-size=4 \
+		--gradient-accumulation-steps=8 \
+		--learning-rate=${lr} \
+		--num-train-epochs=${epochs} \
+		--classifier=${classifier} \
+		--lop
 
 run_docred_debug:
 	python -m examples.cli \
