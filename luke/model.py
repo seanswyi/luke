@@ -52,6 +52,7 @@ class EntityEmbeddings(nn.Module):
     def forward(
         self, entity_ids: torch.LongTensor, position_ids: torch.LongTensor, token_type_ids: torch.LongTensor = None
     ):
+        # import pdb; pdb.set_trace()
         if token_type_ids is None:
             token_type_ids = torch.zeros_like(entity_ids)
 
@@ -59,27 +60,13 @@ class EntityEmbeddings(nn.Module):
         if self.config.entity_emb_size != self.config.hidden_size:
             entity_embeddings = self.entity_embedding_dense(entity_embeddings)
 
-        position_embeddings = self.position_embeddings(position_ids.clamp(min=0))
-        position_embedding_mask = (position_ids != -1).type_as(position_embeddings).unsqueeze(-1)
-        position_embeddings = position_embeddings * position_embedding_mask
-        position_embeddings = torch.sum(position_embeddings, dim=-2)
+        position_embeddings = self.position_embeddings(position_ids.clamp(min=0)) # [batch_size, 2, 30, 1024]
+        position_embedding_mask = (position_ids != -1).type_as(position_embeddings).unsqueeze(-1) # [batch_size, 2, 30 ,1]
+        position_embeddings = position_embeddings * position_embedding_mask # [batch_size, 2, 30, 1024]
+        position_embeddings = torch.sum(position_embeddings, dim=-2) # [batch_size, 2, 1024]
         position_embeddings = position_embeddings / position_embedding_mask.sum(dim=-2).clamp(min=1e-7)
 
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
-
-        # Aggregate mention-level embeddings for document setting. ################################
-        if position_embeddings.dim() == 4:
-            head_mention_embeddings = position_embeddings[:, 0, :, :] # Get all head entity mentions.
-            tail_mention_embeddings = position_embeddings[:, 1, :, :] # Get all tail entity mentions.
-
-            # head_entity_embeddings = torch.sum(head_mention_embeddings, dim=1, keepdim=True)
-            # tail_entity_embeddings = torch.sum(tail_mention_embeddings, dim=1, keepdim=True)
-
-            head_entity_embeddings = torch.logsumexp(head_mention_embeddings, dim=1, keepdim=True)
-            tail_entity_embeddings = torch.logsumexp(tail_mention_embeddings, dim=1, keepdim=True)
-
-            position_embeddings = torch.cat([head_entity_embeddings, tail_entity_embeddings], dim=1)
-        ###########################################################################################
 
         embeddings = entity_embeddings + position_embeddings + token_type_embeddings
         embeddings = self.LayerNorm(embeddings)
@@ -118,6 +105,8 @@ class LukeModel(nn.Module):
 
         embedding_output = self.embeddings(word_ids, word_segment_ids)
         attention_mask = self._compute_extended_attention_mask(word_attention_mask, entity_attention_mask)
+
+        # import pdb; pdb.set_trace()
 
         if entity_ids is not None:
             entity_embedding_output = self.entity_embeddings(entity_ids, entity_position_ids, entity_segment_ids)
@@ -230,13 +219,12 @@ class LukeEntityAwareAttentionModel(LukeModel):
         entity_segment_ids = entity_segment_ids.to(self.args.device)
         entity_attention_mask = entity_attention_mask.to(self.args.device)
 
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
 
         word_embeddings = self.embeddings(word_ids, word_segment_ids) # [batch_size, word_size, emb_dim]
         entity_embeddings = self.entity_embeddings(entity_ids, entity_position_ids, entity_segment_ids) # [batch_size, entity_size, emb_dim]
         attention_mask = self._compute_extended_attention_mask(word_attention_mask, entity_attention_mask) # [batch_size, 1, 1, word_size + entity_size]
 
-        import pdb; pdb.set_trace()
         encoded_output = self.encoder(word_embeddings, entity_embeddings, attention_mask)
 
         return encoded_output
@@ -293,12 +281,15 @@ class EntityAwareSelfAttention(nn.Module):
         """
         word_size = word_hidden_states.size(1)
 
+        import pdb; pdb.set_trace()
+
+        # [batch_size, word_size, hidden_size] -> [batch_size, num_attention_heads, word_size, head_size]
         w2w_query_layer = self.transpose_for_scores(self.query(word_hidden_states)) # [batch_size, num_attention_heads, word_size, head_size]
         w2e_query_layer = self.transpose_for_scores(self.w2e_query(word_hidden_states)) # [batch_size, num_attention_heads, word_size, head_size]
         e2w_query_layer = self.transpose_for_scores(self.e2w_query(entity_hidden_states)) # [batch_size, num_attention_heads, entity_size, head_size]
         e2e_query_layer = self.transpose_for_scores(self.e2e_query(entity_hidden_states)) # [batch_size, num_attention_heads, entity_size, head_size]
 
-        key_layer = self.transpose_for_scores(self.key(torch.cat([word_hidden_states, entity_hidden_states], dim=1)))
+        key_layer = self.transpose_for_scores(self.key(torch.cat([word_hidden_states, entity_hidden_states], dim=1))) # [batch_size, num_attention_heads, word_size + entity_size, head_size]
 
         w2w_key_layer = key_layer[:, :, :word_size, :]
         e2w_key_layer = key_layer[:, :, :word_size, :]
@@ -340,7 +331,6 @@ class EntityAwareAttention(nn.Module):
 
     def forward(self, word_hidden_states, entity_hidden_states, attention_mask):
         word_self_output, entity_self_output = self.self(word_hidden_states, entity_hidden_states, attention_mask)
-        import pdb; pdb.set_trace()
         hidden_states = torch.cat([word_hidden_states, entity_hidden_states], dim=1)
         self_output = torch.cat([word_self_output, entity_self_output], dim=1)
 

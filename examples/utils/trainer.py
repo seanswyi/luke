@@ -91,7 +91,6 @@ class Trainer(object):
         with tqdm(total=self.num_train_steps, disable=self.args.local_rank not in (-1, 0)) as pbar:
             while True:
                 for step, batch in enumerate(self.dataloader):
-                    # inputs = {k: v.to(self.args.device) for k, v in self._create_model_arguments(batch).items()}
                     inputs = {attribute_name: value for attribute_name, value in self._create_model_arguments(batch).items()}
 
                     outputs = model(**inputs)

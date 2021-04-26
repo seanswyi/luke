@@ -24,6 +24,16 @@ from .process_long_seq import process_long_input
 logger = logging.getLogger(__name__)
 
 
+def pad_lists(max_num, list_of_lists):
+    pad_template = [-1] * len(list_of_lists[0][0])
+
+    for idx, l in enumerate(list_of_lists):
+        needed_padding = max_num - len(l)
+        list_of_lists[idx].extend([pad_template] * needed_padding)
+
+    return list_of_lists
+
+
 class LukeConfig(BertConfig):
     def __init__(
         self, vocab_size: int, entity_vocab_size: int, bert_model_name: str, entity_emb_size: int = None, **kwargs
@@ -55,41 +65,79 @@ class EntityEmbeddings(nn.Module):
         self.LayerNorm = BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-    def forward(self, entity_ids: torch.LongTensor, position_ids: torch.LongTensor, token_type_ids: torch.LongTensor = None):
-        if token_type_ids is None:
-            token_type_ids = torch.zeros_like(entity_ids)
+    def forward(self, entity_ids, position_ids, token_type_ids, head_tail_idxs):
+        all_embeddings = []
 
-        entity_embeddings = self.entity_embeddings(entity_ids)
-        if self.config.entity_emb_size != self.config.hidden_size:
-            entity_embeddings = self.entity_embedding_dense(entity_embeddings)
+        expanded_entity_ids = []
+        for head_tail_idx in head_tail_idxs:
+            entity_ids_ = torch.stack(len(head_tail_idx) * [entity_ids[0]]).to('cuda')
+            expanded_entity_ids.append(entity_ids_)
 
-        position_embeddings = self.position_embeddings(position_ids.clamp(min=0))
-        position_embedding_mask = (position_ids != -1).type_as(position_embeddings).unsqueeze(-1)
-        position_embeddings = position_embeddings * position_embedding_mask
-        position_embeddings = torch.sum(position_embeddings, dim=-2)
-        position_embeddings = position_embeddings / position_embedding_mask.sum(dim=-2).clamp(min=1e-7)
+        expanded_token_type_ids = []
+        for head_tail_idx in head_tail_idxs:
+            token_type_ids_ = torch.stack(len(head_tail_idx) * [token_type_ids[0]]).to('cuda')
+            expanded_token_type_ids.append(token_type_ids_)
 
-        token_type_embeddings = self.token_type_embeddings(token_type_ids)
+        for batch_idx, _ in enumerate(entity_ids):
+            batch_entity_ids = expanded_entity_ids[batch_idx]
+            batch_token_type_ids = expanded_token_type_ids[batch_idx]
+            batch_position_ids = position_ids[batch_idx]
+            batch_head_tail_idxs = head_tail_idxs[batch_idx]
 
-        # Aggregate mention-level embeddings for document setting. ################################
-        if position_embeddings.dim() == 4:
-            head_mention_embeddings = position_embeddings[:, 0, :, :] # Get all head entity mentions.
-            tail_mention_embeddings = position_embeddings[:, 1, :, :] # Get all tail entity mentions.
+            batch_entity_embeddings = self.entity_embeddings(batch_entity_ids)
+            if self.config.entity_emb_size != self.config.hidden_size:
+                batch_entity_embeddings = self.entity_embedding_dense(batch_entity_embeddings)
 
-            # head_entity_embeddings = torch.sum(head_mention_embeddings, dim=1, keepdim=True)
-            # tail_entity_embeddings = torch.sum(tail_mention_embeddings, dim=1, keepdim=True)
+            token_type_id_embeddings = self.token_type_embeddings(batch_token_type_ids)
 
-            head_entity_embeddings = torch.logsumexp(head_mention_embeddings, dim=1, keepdim=True)
-            tail_entity_embeddings = torch.logsumexp(tail_mention_embeddings, dim=1, keepdim=True)
+            max_num = len(max(batch_position_ids, key=len))
+            batch_position_ids = pad_lists(max_num=max_num, list_of_lists=batch_position_ids)
 
-            position_embeddings = torch.cat([head_entity_embeddings, tail_entity_embeddings], dim=1)
-        ###########################################################################################
+            position_embedding_mask = []
+            batch_position_embeddings = []
+            for mentions in batch_position_ids:
+                position_embeddings = self.position_embeddings(torch.tensor(mentions).clamp(min=0).to('cuda'))
+                batch_position_embeddings.append(position_embeddings)
 
-        embeddings = entity_embeddings + position_embeddings + token_type_embeddings
-        embeddings = self.LayerNorm(embeddings)
-        embeddings = self.dropout(embeddings)
+                mention_mask = []
+                for mention in mentions:
+                    mask = [1 if x != -1 else 0 for x in mention]
+                    mention_mask.append(mask)
 
-        return embeddings
+                position_embedding_mask.append(mention_mask)
+
+            batch_position_embeddings = torch.stack(batch_position_embeddings, dim=0)
+            position_embedding_mask = torch.FloatTensor(position_embedding_mask).unsqueeze(-1).to('cuda')
+            batch_position_embeddings = batch_position_embeddings * position_embedding_mask
+
+            batch_position_embeddings = batch_position_embeddings.sum(dim=2)
+            normalization_factor = position_embedding_mask.sum(dim=2).clamp(min=1e-7)
+            batch_position_embeddings = batch_position_embeddings / normalization_factor
+
+            batch_head_tail_idxs = torch.tensor(batch_head_tail_idxs).to('cuda')
+            selected_position_embeddings = batch_position_embeddings[batch_head_tail_idxs]
+
+            head_embeddings = batch_entity_embeddings[:, 0] # [num_head_tail_pairs, 1024]
+            tail_embeddings = batch_entity_embeddings[:, 1]
+
+            head_position_embeddings = selected_position_embeddings[:, 0] # [num_head_tail_pairs, num_mentions, 30, 1024]
+            tail_position_embeddings = selected_position_embeddings[:, 1]
+
+            head_position_embeddings = head_position_embeddings.sum(dim=1)
+            tail_position_embeddings = tail_position_embeddings.sum(dim=1)
+            try:
+                head_entity_embeddings = head_embeddings + head_position_embeddings + token_type_id_embeddings[:, 0]
+                tail_entity_embeddings = tail_embeddings + tail_position_embeddings + token_type_id_embeddings[:, 1]
+            except:
+                import pdb; pdb.set_trace()
+
+            entity_embeddings = torch.stack([head_entity_embeddings, tail_entity_embeddings], dim=1)
+            entity_embeddings = self.LayerNorm(entity_embeddings)
+            entity_embeddings = self.dropout(entity_embeddings)
+
+            all_embeddings.append(entity_embeddings)
+
+        return all_embeddings
 
 
 class LukeModelDoc(nn.Module):
@@ -106,14 +154,6 @@ class LukeModelDoc(nn.Module):
         else:
             self.embeddings = BertEmbeddings(config)
         self.entity_embeddings = EntityEmbeddings(config)
-
-    def encode(self, input_ids, attention_mask):
-        start_tokens = [config.cls_token_id]
-        end_tokens = [config.sep_token_id]
-
-        sequence_output, attention = process_long_input(self.encoder, input_ids, attention_mask, start_tokens, end_tokens)
-
-        return sequence_output, attention
 
     def forward(
         self,
@@ -138,7 +178,8 @@ class LukeModelDoc(nn.Module):
             attention_mask = self._compute_extended_attention_mask(word_attention_mask, entity_attention_mask) # [batch_size, 1, 1, word_size]
 
             if entity_ids is not None:
-                entity_embedding_output = self.entity_embeddings(entity_ids, entity_position_ids, entity_segment_ids)
+                entity_embedding_output = self.entity_embeddings(entity_ids, entity_position_ids, entity_segment_ids, head_tail_idxs)
+                import pdb; pdb.set_trace()
                 embedding_output = torch.cat([embedding_output, entity_embedding_output], dim=1)
 
             encoder_outputs = self.encoder(embedding_output, attention_mask=attention_mask, head_mask=([None] * self.config.num_hidden_layers))
@@ -323,95 +364,11 @@ class LukeModelDoc(nn.Module):
         return extended_attention_mask
 
 
-class SingleEntityEmbedding(nn.Module):
-    def __init__(self, config: LukeConfig):
-        super(SingleEntityEmbedding, self).__init__()
-        self.config = config
-
-        self.entity_embeddings = nn.Embedding(config.entity_vocab_size, config.entity_emb_size, padding_idx=0)
-        if config.entity_emb_size != config.hidden_size:
-            self.entity_embedding_dense = nn.Linear(config.entity_emb_size, config.hidden_size, bias=False)
-
-        self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
-        self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)
-
-        self.LayerNorm = BertLayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-
-    def forward(self, entity_id: torch.LongTensor, position_ids: torch.LongTensor, token_type_id: torch.LongTensor = None):
-        if token_type_id is None:
-            token_type_id = torch.zeros_like(entity_id)
-
-        entity_embeddings = self.entity_embeddings(entity_id)
-        if self.config.entity_emb_size != self.config.hidden_size:
-            entity_embeddings = self.entity_embedding_dense(entity_embeddings)
-
-        position_embeddings = self.position_embeddings(position_ids.clamp(min=0))
-        position_embedding_mask = (position_ids != -1).type_as(position_embeddings).unsqueeze(-1)
-        position_embeddings = position_embeddings * position_embedding_mask
-        position_embeddings = torch.sum(position_embeddings, dim=-2) # [mention_size, hidden_dim]
-        position_embeddings = position_embeddings / position_embedding_mask.sum(dim=-2).clamp(min=1e-7) # Normalization.
-
-        token_type_embeddings = self.token_type_embeddings(token_type_id)
-
-        embeddings = entity_embeddings + position_embeddings + token_type_embeddings
-        embeddings = self.LayerNorm(embeddings)
-        embeddings = self.dropout(embeddings)
-
-        return embeddings
-
-
-class HeadTailEmbeddings(EntityEmbeddings):
-    def __init__(self, config):
-        super().__init__(config)
-        self.config = config
-
-        self.embedding = SingleEntityEmbedding(self.config)
-
-    def forward(self, entity_ids, head_tail_idxs, entity_position_ids, entity_segment_ids, device):
-        entity_pair_representations = []
-
-        for batch_idx, _ in enumerate(head_tail_idxs):
-            head_tail_representations = []
-
-            head_tail_pairs = head_tail_idxs[batch_idx]
-            entities = entity_position_ids[batch_idx]
-
-            entity_id_pair = [1, 2]
-            entity_token_type_pair = [0, 0]
-
-            for pair in head_tail_pairs:
-                head_idx = pair[0]
-                tail_idx = pair[1]
-
-                head_entity_id = torch.tensor(entity_id_pair[0]).to(device)
-                tail_entity_id = torch.tensor(entity_id_pair[1]).to(device)
-                head_token_type = torch.tensor(entity_token_type_pair[0]).to(device)
-                tail_token_type = torch.tensor(entity_token_type_pair[1]).to(device)
-
-                head_positions = torch.tensor(entities[head_idx]).to(device)
-                tail_positions = torch.tensor(entities[tail_idx]).to(device)
-
-                head_embeddings = self.embedding(head_entity_id, head_positions, head_token_type)
-                tail_embeddings = self.embedding(tail_entity_id, tail_positions, tail_token_type)
-
-                head_embeddings = torch.sum(head_embeddings, dim=0, keepdim=True)
-                tail_embeddings = torch.sum(tail_embeddings, dim=0, keepdim=True)
-
-                head_tail_representation = torch.cat([head_embeddings, tail_embeddings], dim=0)
-                head_tail_representations.append(head_tail_representation)
-
-            entity_pair_representations.append(head_tail_representations)
-
-        return entity_pair_representations
-
-
 class LukeEntityAwareAttentionModelDoc(LukeModelDoc):
     def __init__(self, config):
         super(LukeEntityAwareAttentionModelDoc, self).__init__(config)
         self.config = config
         self.encoder = EntityAwareEncoder(config)
-        self.head_tail_encoder = HeadTailEmbeddings(self.config)
 
     def forward(
         self,
@@ -422,6 +379,7 @@ class LukeEntityAwareAttentionModelDoc(LukeModelDoc):
         entity_position_ids,
         entity_segment_ids,
         entity_attention_mask,
+        token_type_ids,
         head_tail_idxs
     ):
         word_ids = word_ids.to(self.args.device)
@@ -432,13 +390,12 @@ class LukeEntityAwareAttentionModelDoc(LukeModelDoc):
         entity_attention_mask = entity_attention_mask.to(self.args.device)
 
         word_embeddings = self.embeddings(word_ids, word_segment_ids) # [batch_size, seq_len, emb_dim]
-        import pdb; pdb.set_trace()
-        entity_representations = self.head_tail_encoder(entity_ids, head_tail_idxs, entity_position_ids, entity_segment_ids, device=self.args.device)
+        entity_embeddings = self.entity_embeddings(entity_ids, entity_position_ids, token_type_ids, head_tail_idxs)
 
         # entity_embeddings = self.entity_embeddings(entity_ids, entity_position_ids, entity_segment_ids) # [batch_size, entity_size, emb_dim]
         attention_mask = self._compute_extended_attention_mask(word_attention_mask, entity_attention_mask)
 
-        encoded_output = self.encoder(word_embeddings, entity_representations, attention_mask)
+        encoded_output = self.encoder(word_embeddings, entity_embeddings, attention_mask)
 
         return encoded_output
 
@@ -485,11 +442,7 @@ class EntityAwareSelfAttention(nn.Module):
 
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
-
-        try:
-            new_x = x.view(*new_x_shape).permute(0, 2, 1, 3)
-        except RuntimeError:
-            new_x = x.view(*new_x_shape).permute(1, 0, 2)
+        new_x = x.view(*new_x_shape).permute(0, 2, 1, 3)
 
         return new_x
 
@@ -503,52 +456,109 @@ class EntityAwareSelfAttention(nn.Module):
         all_word_representations = []
         all_entity_representations = []
 
-        for batch_idx, _ in enumerate(entity_hidden_states): # [batch_size, head_tail_pair_size, entity_size, hidden_dim]
-            encoded_text = word_hidden_states[batch_idx] # [word_size, hidden_dim]
-            head_tail_pairs = entity_hidden_states[batch_idx] # [head_tail_size, entity_size, hidden_dim]
-            attention_mask_ = attention_mask[batch_idx]
+        for batch_idx, _ in enumerate(word_hidden_states):
+            word_embeddings = word_hidden_states[batch_idx]
+            entity_embeddings = entity_hidden_states[batch_idx]
+            batch_attention_mask = attention_mask[batch_idx]
 
-            w2w_query_layer = self.transpose_for_scores(self.query(encoded_text)) # [word_size, hidden_dim]
-            w2e_query_layer = self.transpose_for_scores(self.w2e_query(encoded_text)) # [word_size, hidden_dim]
+            num_head_tail_pairs = entity_embeddings.shape[0]
+            expanded_word_embeddings = word_embeddings.expand(num_head_tail_pairs, word_size, self.config.hidden_size)
 
-            head_tail_pbar = tqdm(iterable=head_tail_pairs, desc=f"Processing (h, t) for batch {batch_idx + 1}", total=len(head_tail_pairs))
-            for pair in head_tail_pbar:
-                e2w_query_layer = self.transpose_for_scores(self.e2w_query(pair))
-                e2e_query_layer = self.transpose_for_scores(self.e2e_query(pair))
+            w2w_query_layer = self.transpose_for_scores(self.query(word_embeddings.unsqueeze(0)))
+            w2e_query_layer = self.transpose_for_scores(self.w2e_query(word_embeddings.unsqueeze(0)))
+            e2w_query_layer = self.transpose_for_scores(self.e2w_query(entity_embeddings))
+            e2e_query_layer = self.transpose_for_scores(self.e2e_query(entity_embeddings))
 
-                key_layer = self.transpose_for_scores(self.key(torch.cat([encoded_text, pair], dim=0)))
+            key_layer = self.transpose_for_scores(self.key(torch.cat([expanded_word_embeddings, entity_embeddings], dim=1)))
 
-                w2w_key_layer = key_layer[:, :word_size, :]
-                e2w_key_layer = key_layer[:, :word_size, :]
-                w2e_key_layer = key_layer[:, word_size:, :]
-                e2e_key_layer = key_layer[:, word_size:, :]
+            w2w_key_layer = key_layer[:, :, :word_size, :]
+            e2w_key_layer = key_layer[:, :, :word_size, :]
+            w2e_key_layer = key_layer[:, :, word_size:, :]
+            e2e_key_layer = key_layer[:, :, word_size:, :]
 
-                w2w_attention_scores = torch.matmul(w2w_query_layer, w2w_key_layer.transpose(-1, -2))
-                w2e_attention_scores = torch.matmul(w2e_query_layer, w2e_key_layer.transpose(-1, -2))
-                e2w_attention_scores = torch.matmul(e2w_query_layer, e2w_key_layer.transpose(-1, -2))
-                e2e_attention_scores = torch.matmul(e2e_query_layer, e2e_key_layer.transpose(-1, -2))
+            w2w_attention_scores = torch.matmul(w2w_query_layer, w2w_key_layer.transpose(-1, -2))
+            w2e_attention_scores = torch.matmul(w2e_query_layer, w2e_key_layer.transpose(-1, -2))
+            e2w_attention_scores = torch.matmul(e2w_query_layer, e2w_key_layer.transpose(-1, -2))
+            e2e_attention_scores = torch.matmul(e2e_query_layer, e2e_key_layer.transpose(-1, -2))
 
-                word_attention_scores = torch.cat([w2w_attention_scores, w2e_attention_scores], dim=2)
-                entity_attention_scores = torch.cat([e2w_attention_scores, e2e_attention_scores], dim=2)
-                attention_scores = torch.cat([word_attention_scores, entity_attention_scores], dim=1)
-                attention_scores = attention_scores / math.sqrt(self.attention_head_size)
-                attention_scores = attention_scores + attention_mask_
+            del w2w_query_layer
+            del w2e_query_layer
+            del e2w_query_layer
+            del e2e_query_layer
+            del w2w_key_layer
+            del w2e_key_layer
+            del e2w_key_layer
+            del e2e_key_layer
+            del key_layer
+            torch.cuda.empty_cache()
 
-                attention_probs = F.softmax(attention_scores, dim=-1)
-                attention_probs = self.dropout(attention_probs)
+            word_attention_scores = torch.cat([w2w_attention_scores, w2e_attention_scores], dim=-1)
 
-                value_layer = self.transpose_for_scores(self.value(torch.cat([encoded_text, pair], dim=0)))
+            del w2w_attention_scores
+            del w2e_attention_scores
+            torch.cuda.empty_cache()
 
-                context_layer = torch.matmul(attention_probs, value_layer)
-                context_layer = context_layer.permute(1, 0, 2).contiguous()
-                new_context_layer_shape = context_layer.shape[:-2] + (self.all_head_size,)
-                context_layer = context_layer.view(*new_context_layer_shape)
+            entity_attention_scores = torch.cat([e2w_attention_scores, e2e_attention_scores], dim=-1)
 
-                word_representations = context_layer[:word_size, :]
-                entity_representations = context_layer[word_size:, :]
+            del e2w_attention_scores
+            del e2e_attention_scores
+            torch.cuda.empty_cache()
 
-                all_word_representations.append(word_representations)
-                all_entity_representations.append(entity_representations)
+            attention_scores = torch.cat([word_attention_scores, entity_attention_scores], dim=2)
+
+            del word_attention_scores
+            del entity_attention_scores
+            torch.cuda.empty_cache()
+
+            attention_scores = (attention_scores / math.sqrt(self.attention_head_size)) + batch_attention_mask
+
+            del batch_attention_mask
+            torch.cuda.empty_cache()
+
+            attention_probs = F.softmax(attention_scores, dim=-1)
+
+            del attention_scores
+            torch.cuda.empty_cache()
+
+            value_layer = self.transpose_for_scores(self.value(torch.cat([expanded_word_embeddings, entity_embeddings], dim=1)))
+
+            del expanded_word_embeddings
+            del entity_embeddings
+            torch.cuda.empty_cache()
+
+            context_representation = torch.matmul(attention_probs, value_layer).permute(0, 2, 1, 3).contiguous()
+
+            del attention_probs
+            del value_layer
+            torch.cuda.empty_cache()
+
+            new_context_representation_shape = context_representation.shape[:-2] + (self.all_head_size,)
+            context_representation = context_representation.view(*new_context_representation_shape)
+
+            word_representations = context_representation[:, :word_size, :]
+            entity_representations = context_representation[:, word_size:, :]
+
+            all_word_representations.append(word_representations)
+            all_entity_representations.append(entity_representations)
+
+
+        import pdb; pdb.set_trace()
+
+                # attention_probs = F.softmax(attention_scores, dim=-1)
+                # attention_probs = self.dropout(attention_probs)
+
+                # value_layer = self.transpose_for_scores(self.value(torch.cat([encoded_text, pair], dim=0)))
+
+                # context_layer = torch.matmul(attention_probs, value_layer)
+                # context_layer = context_layer.permute(1, 0, 2).contiguous()
+                # new_context_layer_shape = context_layer.shape[:-2] + (self.all_head_size,)
+                # context_layer = context_layer.view(*new_context_layer_shape)
+
+                # word_representations = context_layer[:word_size, :]
+                # entity_representations = context_layer[word_size:, :]
+
+                # all_word_representations.append(word_representations)
+                # all_entity_representations.append(entity_representations)
 
         #         import pdb; pdb.set_trace()
 

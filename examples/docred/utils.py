@@ -189,6 +189,9 @@ class DatasetProcessor(object):
         with open(file=os.path.join(data_dir, set_type + '.json')) as f:
             data = json.load(f)
 
+        if debug:
+            data = data[:200]
+
         examples = []
         pbar = tqdm(iterable=data, desc=f"Processing {set_type}", total=len(data))
         for i, item in enumerate(pbar):
@@ -244,7 +247,7 @@ class DatasetProcessor(object):
                         relations.append(relation)
                         head_tail_pairs.append(head_tail_pair)
 
-            example = InputExample(f'{title}', # Need to change this to be title.
+            example = InputExample(f'{title}',
                                    ' '.join(whole_text),
                                    entity_pos,
                                    head_tail_pairs,

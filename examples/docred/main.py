@@ -1,11 +1,12 @@
 from argparse import Namespace
+from collections import Counter
 import json
 import logging
 import os
-import pickle
 import sys
 
 import click
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
@@ -46,6 +47,7 @@ def cli():
 @click.option('--classifier', default='linear')
 @click.option('--at_loss/--no-at_loss', default=False)
 @click.option('--lop/--no-lop', default=False)
+@click.option('--top_k', default=4)
 
 @trainer_args
 @click.pass_obj
@@ -62,9 +64,13 @@ def run(common_args, **task_args):
     num_epochs = args.num_train_epochs
     classifier_type = args.classifier
 
-    if args.at_loss:
+    if args.at_loss and args.lop:
+        wandb.init(project='LUKE DocRED', name=f'DocRED_{lr}_atlop_{classifier_type}_{int(num_epochs)}')
+    elif args.at_loss and (not args.lop):
         wandb.init(project="LUKE DocRED", name=f'DocRED_{lr}_atloss_{classifier_type}_{int(num_epochs)}')
-    elif not args.at_loss:
+    elif (not args.at_loss) and args.lop:
+        wandb.init(project="LUKE DocRED", name=f'DocRED_{lr}_lop_{classifier_type}_{int(num_epochs)}')
+    elif (not args.at_loss) and (not args.lop):
         wandb.init(project="LUKE DocRED", name=f'DocRED_{lr}_{classifier_type}_{int(num_epochs)}')
 
     set_seed(args.seed)
@@ -97,7 +103,11 @@ def run(common_args, **task_args):
 
         model.to(args.device)
 
-        num_train_steps_per_epoch = len(train_dataloader) // args.gradient_accumulation_steps
+        if args.debug:
+            num_train_steps_per_epoch = 10
+        elif not args.debug:
+            num_train_steps_per_epoch = len(train_dataloader) // args.gradient_accumulation_steps
+
         num_train_steps = int(num_train_steps_per_epoch * args.num_train_epochs)
 
         logger.info(f"num_train_steps_per_epoch = {num_train_steps_per_epoch}")
@@ -112,7 +122,8 @@ def run(common_args, **task_args):
                 dev_normal_scores, dev_ignore_scores = evaluate(args, model, fold='dev')
 
                 results.update({f'dev_{k}_epoch{epoch}': v for k, v in dev_normal_scores.items()})
-                tqdm.write(f"dev | P: {dev_normal_scores['precision']} R: {dev_normal_scores['recall']} F1: {dev_normal_scores['f1']}")
+                tqdm.write(f"dev | P: {dev_normal_scores['precision']}, R: {dev_normal_scores['recall']}, F1: {dev_normal_scores['f1']} | \
+                    Ign P: {dev_ignore_scores['ign_precision']}, Ign R: {dev_ignore_scores['ign_recall']}, Ign F1: {dev_ignore_scores['ign_f1']}")
 
                 if dev_normal_scores['f1'] > best_dev_f1[0]:
                     if hasattr(model, 'module'):
@@ -168,12 +179,16 @@ def evaluate(args, model, fold='dev', output_file=None):
         inputs = {attribute_name: value for attribute_name, value in batch.items() if attribute_name != 'label'}
 
         with torch.no_grad():
-            logits = model(**inputs)
+            preds = model(**inputs)[0]
 
-        predictions.extend(logits.detach().cpu().numpy().argmax(axis=1))
+        predictions.extend(preds.detach().cpu().numpy())
         labels.extend(sum(batch['label'], []))
 
+    predictions = np.array(predictions)
     official_format_predictions = convert_to_official_format(predictions, features)
+
+    pred_labels = [tuple(np.nonzero(pred)[0].tolist()) for pred in predictions]
+    print(f"Predictions: {Counter(pred_labels)}")
 
     if len(official_format_predictions) > 0:
         normal_scores, ignore_scores = docred_official_evaluate(official_format_predictions, args.data_dir)

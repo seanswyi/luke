@@ -28,9 +28,9 @@ def convert_to_official_format(predictions, features):
         for p in prediction:
             if p != 0:
                 template = {'title': titles[pred_idx],
-                            'head_idx': head_idxs[pred_idx],
-                            'tail_idx': tail_idxs[pred_idx],
-                            'relation': id2rel[p]}
+                            'h_idx': head_idxs[pred_idx],
+                            't_idx': tail_idxs[pred_idx],
+                            'r': id2rel[p]}
                 results.append(template)
 
     return results
@@ -115,8 +115,6 @@ def docred_official_evaluate(tmp, path):
 
     correct_re = 0
 
-    import pdb; pdb.set_trace()
-
     correct_in_train_annotated = 0
     titleset2 = set([])
     for x in submission_answer:
@@ -124,9 +122,12 @@ def docred_official_evaluate(tmp, path):
         h_idx = x['h_idx']
         t_idx = x['t_idx']
         r = x['r']
+
         titleset2.add(title)
+
         if title not in title2vectexSet:
             continue
+
         vertexSet = title2vectexSet[title]
 
         if (title, r, h_idx, t_idx) in std:

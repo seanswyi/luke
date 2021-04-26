@@ -7,7 +7,7 @@ from .model_docred import LukeModelDoc, LukeEntityAwareAttentionModelDoc
 from .process_long_seq import process_long_input
 
 
-class LukeForDocRED(LukeModelDoc):
+class LukeForDocRED(LukeEntityAwareAttentionModelDoc):
     def __init__(self, args, num_labels):
         super(LukeForDocRED, self).__init__(args.model_config)
 
@@ -33,16 +33,20 @@ class LukeForDocRED(LukeModelDoc):
 
         self.at_loss = ATLoss()
 
-    def encode(self, input_ids, attention_mask):
-        config = self.config
-        if config.transformer_type == "bert":
-            start_tokens = [config.cls_token_id]
-            end_tokens = [config.sep_token_id]
-        elif config.transformer_type == "roberta":
-            start_tokens = [config.cls_token_id]
-            end_tokens = [config.sep_token_id, config.sep_token_id]
-        sequence_output, attention = process_long_input(self.model, input_ids, attention_mask, start_tokens, end_tokens)
-        return sequence_output, attention
+    def get_labels(self, logits, k):
+        threshold_logit = logits[:, 0].unsqueeze(1)
+        output = torch.zeros_like(logits).to(logits)
+        logit_mask = (logits > threshold_logit)
+
+        if k > 0:
+            top_k, _ = torch.topk(input=logits, k=k, dim=1)
+            top_k = top_k[:, -1]
+            logit_mask = (logits >= top_k.unsqueeze(1)) & logit_mask
+
+        output[logit_mask] = 1.0
+        output[:, 0] = (output.sum(1) == 0.0).to(logits)
+
+        return output
 
     def get_head_tail_representations(self, sequence_output, attention, head_tail_idxs, entity_position_ids):
         """
@@ -77,10 +81,11 @@ class LukeForDocRED(LukeModelDoc):
                 for head_entity_position in head_entity_positions:
                     valid_position = [idx for idx in head_entity_position if idx != -1]
                     head_embeddings_ = encoded_text[valid_position]
-                    try:
-                        head_attentions_ = attention_output[:, valid_position]
-                    except RuntimeError:
-                        import pdb; pdb.set_trace()
+                    head_attentions_ = attention_output[:, valid_position]
+
+                    # if torch.any(torch.isnan(head_attentions_)):
+                    #     import pdb; pdb.set_trace()
+
                     head_embeddings.append(torch.sum(head_embeddings_, dim=0, keepdim=True))
                     head_attentions.append(head_attentions_)
 
@@ -88,6 +93,10 @@ class LukeForDocRED(LukeModelDoc):
                     valid_position = [idx for idx in tail_entity_position if idx != -1]
                     tail_embeddings_ = encoded_text[valid_position]
                     tail_attentions_ = attention_output[:, valid_position]
+
+                    # if torch.any(torch.isnan(tail_attentions_)):
+                    #     import pdb; pdb.set_trace()
+
                     tail_embeddings.append(torch.sum(tail_embeddings_, dim=0, keepdim=True))
                     tail_attentions.append(tail_attentions_)
 
@@ -128,16 +137,19 @@ class LukeForDocRED(LukeModelDoc):
         word_ids = word_ids.to(self.args.device)
         word_segment_ids = word_segment_ids.to(self.args.device)
         word_attention_mask = word_attention_mask.to(self.args.device)
+        entity_segment_ids = entity_segment_ids.to(self.args.device)
+        entity_attention_mask = entity_attention_mask.to(self.args.device)
 
         encoder_outputs = super(LukeForDocRED, self).forward(
-            word_ids,
-            word_segment_ids,
-            word_attention_mask,
-            None,
-            None,
-            None,
-            None,
-            None
+            word_ids=word_ids,
+            word_segment_ids=word_segment_ids,
+            word_attention_mask=word_attention_mask,
+            entity_ids=entity_ids,
+            entity_position_ids=entity_position_ids,
+            entity_segment_ids=entity_segment_ids,
+            entity_attention_mask=entity_attention_mask,
+            token_type_ids=torch.tensor([[0, 0]]),
+            head_tail_idxs=head_tail_idxs
         )
 
         sequence_output = encoder_outputs[0]
@@ -148,6 +160,9 @@ class LukeForDocRED(LukeModelDoc):
         all_heads = torch.cat(sum(heads, []), dim=0) # [batch_size * num_head_tails, hidden_dim]
         all_tails = torch.cat(sum(tails, []), dim=0) # [batch_size * num_head_tails, hidden_dim]
         all_attentions = torch.cat(sum(attentions, []), dim=0) # [batch_size * num_head_tails, hidden_dim]
+
+        # if torch.any(torch.isnan(all_attentions)):
+        #     import pdb; pdb.set_trace()
 
         if self.args.classifier == 'linear':
             feature_vector = self.dropout(torch.cat([all_heads, all_tails], dim=1))
@@ -167,20 +182,22 @@ class LukeForDocRED(LukeModelDoc):
 
         logits = self.classifier(feature_vector)
 
-        if label is None:
-            return logits
+        outputs = (self.get_labels(logits=logits, k=self.args.top_k),)
 
-        labels = torch.tensor(sum(label, [])).to(self.args.device)
+        if label:
+            labels = torch.tensor(sum(label, [])).to(self.args.device)
 
-        if self.args.at_loss:
-            one_hot_labels = torch.zeros(size=(labels.shape[0], self.num_labels)).to(self.args.device)
+            if self.args.at_loss:
+                one_hot_labels = torch.zeros(size=(labels.shape[0], self.num_labels)).to(self.args.device)
 
-            for idx, label in enumerate(labels):
-                label_value = label.cpu().item()
-                one_hot_labels[idx][label_value] = 1
+                for idx, label in enumerate(labels):
+                    label_value = label.cpu().item()
+                    one_hot_labels[idx][label_value] = 1
 
-            loss = self.at_loss(logits, one_hot_labels)
-        else:
-            loss = F.cross_entropy(logits, labels)
+                loss = self.at_loss(logits, one_hot_labels)
+            else:
+                loss = F.cross_entropy(logits, labels)
 
-        return (loss,)
+            outputs = (loss,) + outputs
+
+        return outputs

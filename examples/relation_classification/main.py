@@ -19,6 +19,7 @@ from ..utils.trainer import Trainer, trainer_args
 from .model import LukeForRelationClassification
 from .utils import HEAD_TOKEN, TAIL_TOKEN, convert_examples_to_features, DatasetProcessor, DocumentDatasetProcessor
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -40,14 +41,23 @@ def cli():
 @click.option('--setting', default='sentence')
 @click.option('--debug/--no-debug', default=False)
 @click.option('--multi-gpu/--no-multi-gpu', default=False)
+@click.option('--atloss/--no-atloss', default=False)
+
+@click.option('--classifier', default='linear')
 
 @trainer_args
 @click.pass_obj
 def run(common_args, **task_args):
-    wandb.init(project="LUKE DocRED", name="logsumexp")
     logger.info("Started process.")
     task_args.update(common_args)
     args = Namespace(**task_args)
+
+    if args.atloss:
+        wandb_name = f'TACRED_{args.classifier}_{args.learning_rate}_atloss'
+    elif not args.atloss:
+        wandb_name = f'TACRED_{args.classifier}_{args.learning_rate}'
+
+    wandb.init(project="LUKE DocRED", name=wandb_name)
 
     set_seed(args.seed)
 
@@ -78,8 +88,6 @@ def run(common_args, **task_args):
             model = torch.nn.DataParallel(model)
 
         model.to(args.device)
-
-        import pdb; pdb.set_trace()
 
         num_train_steps_per_epoch = len(train_dataloader) // args.gradient_accumulation_steps
         num_train_steps = int(num_train_steps_per_epoch * args.num_train_epochs)
